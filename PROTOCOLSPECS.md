@@ -105,3 +105,21 @@ exists publicly.
 | mDNS / DNS-SD | **[Bonjour Conformance Test](https://developer.apple.com/bonjour/) (Apple)** — downloadable harness + guideline PDF on the Apple Developer site. | Checks wire-format, probing, conflict handling, and §10 goodbye against Apple's reference behaviour.  Not an IETF document but the accepted bar for mDNS interoperability. |
 | NetBIOS-NS | **None.** Neither IETF (RFC 1001/1002) nor Microsoft (MS-BRWS, MS-NBTE, MS-CIFS) publishes a test suite.  Microsoft's [Windows Protocol Test Suites](https://github.com/microsoft/WindowsProtocolTestSuites) repo covers SMB2 / DFS / Kerberos / RDP but **does not include NetBIOS**. | De-facto reference: Samba's `source4/torture/nbt/` (register.c, query.c, wins.c, dgram.c) — self-tests of the Samba NBT stack.  The `truenas_pynetbiosns` README cites the specific test files we mirror. |
 | WSD | **None.**  OASIS's WS-DD Technical Committee (WS-Discovery 1.1, DPWS 1.1, SOAP-over-UDP 1.1) never published a conformance harness and was closed in 2016. | Closest equivalent: Microsoft's [WSDAPI Specification Compliance](https://learn.microsoft.com/en-us/windows/win32/wsdapi/wsdapi-specification-compliance) — a written MUST/SHOULD/MAY profile (already cited in the normative section).  Interop with Windows Explorer's Network view is the practical acceptance bar. |
+
+---
+
+## Reference Implementations
+
+For behaviours that are under-specified by the RFCs (probe-conflict
+backoff, flap handling, stale-packet tolerance, etc.) we pin a
+specific version of each reference implementation so that citations
+in code comments stay stable.  Upgrade paths: bump the tag here,
+re-check the cited lines, update comment references in the same
+commit.
+
+| Protocol | Reference | Pinned version | Notes |
+|----------|-----------|----------------|-------|
+| mDNS / DNS-SD | [apple-oss-distributions/mDNSResponder](https://github.com/apple-oss-distributions/mDNSResponder) | [`mDNSResponder-2881.0.25`](https://github.com/apple-oss-distributions/mDNSResponder/releases/tag/mDNSResponder-2881.0.25) | Line numbers cited in our code comments (`mDNSCore/mDNS.c:*`, `mDNSPosix/mDNSPosix.c:*`) are against this tag.  Re-verify if bumped. |
+| mDNS / DNS-SD | [avahi/avahi](https://github.com/avahi/avahi) | master (no stable tag pinned) | avahi has not cut a release since 0.8 (2020); we cross-reference `avahi-core/probe-sched.c`, `response-sched.c`, `announce.c`. |
+| NetBIOS-NS | [samba-team/samba](https://gitlab.com/samba-team/samba) `source4/torture/nbt/` | master | NBT self-tests (`register.c`, `query.c`, `wins.c`, `dgram.c`) used as behavioural reference — we match their expected packet shapes. |
+| WSD | *(none pinned)* | — | OASIS did not publish a reference; we rely on the normative specs + Microsoft's WSDAPI compliance page. |

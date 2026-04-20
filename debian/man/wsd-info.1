@@ -1,0 +1,37 @@
+.TH WSD\-INFO 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+wsd\-info \- fetch metadata from a WSD device
+.SH SYNOPSIS
+.B wsd\-info
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-\-json ]
+.I URL
+.SH DESCRIPTION
+.B wsd\-info
+sends an HTTP SOAP Get request to a WSD device's metadata endpoint
+and prints the returned device information: FriendlyName, Manufacturer,
+ModelName, and Computer (hostname/workgroup or domain membership).
+.PP
+The URL is typically obtained from the XAddrs field in a
+.BR wsd\-discover (1)
+response.
+.SH OPTIONS
+.TP
+.I URL
+Device metadata URL (e.g.\ \fBhttp://192.168.1.100:5357/uuid\fP).
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Request timeout in seconds.
+Default: 5.0.
+.TP
+.B \-\-json
+Output as JSON.
+.SH EXAMPLES
+.nf
+wsd\-info http://192.168.1.100:5357/12345678\-1234\-1234\-1234\-123456789abc
+wsd\-info http://10.0.0.5:5357/uuid \-\-json
+.fi
+.SH SEE ALSO
+.BR wsd\-discover (1),
+.BR truenas\-wsd (8)

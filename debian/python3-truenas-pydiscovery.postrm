@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+if [ "$1" = "purge" ]; then
+    if getent passwd truenas-pydiscovery >/dev/null; then
+        deluser --quiet --system truenas-pydiscovery >/dev/null || true
+    fi
+    # /run/truenas-pydiscovery is managed by systemd's RuntimeDirectory=
+    # and normally vanishes on service stop, but clean up any remnant
+    # (e.g. if the package is purged while the host is shut down).
+    if [ -d /run/truenas-pydiscovery ]; then
+        rm -rf /run/truenas-pydiscovery
+    fi
+fi
+
+exit 0

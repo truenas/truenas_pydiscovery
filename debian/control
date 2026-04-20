@@ -1,0 +1,18 @@
+Source: truenas-pydiscovery
+Section: contrib/python
+Priority: optional
+Maintainer: TrueNAS Engineering <dev@truenas.com>
+Build-Depends: debhelper-compat (= 12),
+               dh-python,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools
+Standards-Version: 4.4.1
+
+Package: python3-truenas-pydiscovery
+Architecture: all
+Depends: ${misc:Depends}, ${python3:Depends}, python3-defusedxml, adduser
+Description: TrueNAS network service discovery daemons
+ Pure-Python implementations of mDNS/DNS-SD (RFC 6762/6763),
+ NetBIOS Name Service, and Web Services Discovery for TrueNAS.
+ Uses defusedxml for safe XML parsing in the WSD module.

@@ -176,7 +176,7 @@ Man pages:
 
 ```bash
 nbt-lookup TRUENAS                        # Resolve NetBIOS name to IP
-nbt-lookup MYHOST --type 0x00             # Query workstation name type
+nbt-lookup MYHOST --type WORKSTATION      # Query workstation name type
 nbt-status 192.168.1.100                  # List all registered names on host
 nbt-status 10.0.0.5 --json                # JSONL output
 ```

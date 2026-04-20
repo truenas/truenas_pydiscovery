@@ -1,0 +1,37 @@
+.TH NBT\-STATUS 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+nbt\-status \- query registered names on a NetBIOS host
+.SH SYNOPSIS
+.B nbt\-status
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-\-json ]
+.I HOST
+.SH DESCRIPTION
+.B nbt\-status
+sends a NetBIOS node status query (NBSTAT) to the specified IP
+address and prints a table of all registered names with their
+types and flags.
+Similar to
+.BR "nbtstat \-a" .
+.PP
+No daemon is required.
+.SH OPTIONS
+.TP
+.I HOST
+IP address of the host to query.
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Query timeout in seconds.
+Default: 2.0.
+.TP
+.B \-\-json
+Output as JSONL (one JSON object per registered name).
+.SH EXAMPLES
+.nf
+nbt\-status 192.168.1.100
+nbt\-status 10.0.0.5 \-\-json
+.fi
+.SH SEE ALSO
+.BR nbt\-lookup (1),
+.BR truenas\-netbiosns (8)

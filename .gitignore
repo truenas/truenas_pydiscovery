@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pybuild/
+build/
+.mypy_cache/
+.pytest_cache/
+
+# Debian build artifacts (source files are changelog, control, rules)
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper
+debian/*.substvars
+debian/python3-truenas-pydiscovery/
+
+# Local protocol spec snapshots (redistributable; fetch with make specs or similar)
+docs/specs/

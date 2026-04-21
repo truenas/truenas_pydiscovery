@@ -14,7 +14,7 @@ license = {text = "LGPL-3.0-or-later"}
 dependencies = ["defusedxml"]
 
 [project.scripts]
-truenas-pydiscoveryd = "truenas_pydiscovery.server.__main__:main"
+truenas-discoveryd = "truenas_pydiscovery.server.__main__:main"
 mdns-browse = "truenas_pymdns.client.cli.browse:main"
 mdns-resolve = "truenas_pymdns.client.cli.resolve:main"
 mdns-lookup = "truenas_pymdns.client.cli.lookup:main"

@@ -2,7 +2,7 @@
 
 Pure-Python Web Services Discovery (WSD) implementation for TrueNAS.
 This package is a **library** — the server is launched via the unified
-`truenas-pydiscoveryd` daemon (see the top-level `README.md`), not
+`truenas-discoveryd` daemon (see the top-level `README.md`), not
 independently.
 
 ## Protocol Specifications
@@ -30,7 +30,7 @@ The following open-source projects were used as implementation references:
 ## Subpackages
 
 - [protocol/](protocol/README.md) — SOAP/XML message building and parsing with defusedxml
-- [server/](server/README.md) — server module: config, discovery, metadata exchange. Hosted inside `truenas-pydiscoveryd`.
+- [server/](server/README.md) — server module: config, discovery, metadata exchange. Hosted inside `truenas-discoveryd`.
 - [client/](client/README.md) — CLI tools (`wsd-discover`, `wsd-info`)
 
 ## Limitations

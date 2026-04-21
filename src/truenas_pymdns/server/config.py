@@ -5,14 +5,14 @@ The middleware calls ``generate_daemon_config()`` and
 ``generate_service_config()`` to produce config bytes from
 validated parameters.  The daemon side is driven by the unified
 loader in ``truenas_pydiscovery.config``, which reads the
-``[mdns]`` section of ``truenas-pydiscoveryd.conf`` into a
+``[mdns]`` section of ``truenas-discoveryd.conf`` into a
 ``DaemonConfig`` (defined here); ``load_daemon_config()`` below
 remains for compatibility with tests and any caller that wants to
 load a free-standing mDNS-only config file.
 
 Unified daemon config (the sole production path):
 
-    /etc/truenas-pydiscovery/truenas-pydiscoveryd.conf
+    /etc/truenas-discovery/truenas-discoveryd.conf
 
     [mdns]
     enabled = yes
@@ -22,10 +22,10 @@ Unified daemon config (the sole production path):
     use-ipv4 = yes
     use-ipv6 = yes
     cache-entries-max = 4096
-    service-dir = /etc/truenas-pydiscovery/services.d
+    service-dir = /etc/truenas-discovery/services.d
 
 Per-service file format
-(``/etc/truenas-pydiscovery/services.d/SMB.conf``):
+(``/etc/truenas-discovery/services.d/SMB.conf``):
 
     [service]
     type = _smb._tcp
@@ -52,7 +52,7 @@ from truenas_pymdns.protocol.constants import (
 # daemon — kept as the parameter default for ``load_daemon_config``
 # so tests and external callers get a predictable path).
 DEFAULT_CONFIG_PATH = Path(
-    "/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf",
+    "/etc/truenas-discovery/truenas-discoveryd.conf",
 )
 
 # Bounds for config values parsed from INI files
@@ -60,8 +60,8 @@ _MIN_CACHE_ENTRIES = 64
 _MAX_CACHE_ENTRIES = 1_000_000
 _MAX_RATELIMIT_INTERVAL_USEC = 60_000_000
 _MAX_RATELIMIT_BURST = 100_000
-DEFAULT_SERVICE_DIR = Path("/etc/truenas-pydiscovery/services.d")
-DEFAULT_RUNDIR = Path("/run/truenas-pydiscovery/mdns")
+DEFAULT_SERVICE_DIR = Path("/etc/truenas-discovery/services.d")
+DEFAULT_RUNDIR = Path("/run/truenas-discovery/mdns")
 
 
 # ---------------------------------------------------------------------------

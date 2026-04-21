@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=truenas-pydiscovery
+User=truenas-discovery
 Group=daemon
-ExecStart=/usr/bin/truenas-pydiscoveryd -c /etc/truenas-pydiscovery/truenas-pydiscoveryd.conf
+ExecStart=/usr/bin/truenas-discoveryd -c /etc/truenas-discovery/truenas-discoveryd.conf
 ExecReload=/bin/kill -HUP $MAINPID
-RuntimeDirectory=truenas-pydiscovery
+RuntimeDirectory=truenas-discovery
 RuntimeDirectoryMode=0755
-ConfigurationDirectory=truenas-pydiscovery
+ConfigurationDirectory=truenas-discovery
 Restart=on-failure
 RestartSec=5
 PrivateTmp=true

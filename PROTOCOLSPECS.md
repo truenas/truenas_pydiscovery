@@ -1,7 +1,7 @@
 # Protocol Specifications
 
 Normative references for the three protocols implemented by
-`truenas-pydiscoveryd`. Each entry links to the canonical public
+`truenas-discoveryd`. Each entry links to the canonical public
 specification; where the repo carries a local archival copy under
 `docs/specs/`, the filename is noted in the **Local copy** column.
 

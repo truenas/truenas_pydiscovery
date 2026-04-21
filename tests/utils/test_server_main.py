@@ -35,7 +35,7 @@ enabled = false
 """)
     monkeypatch.setattr(
         "sys.argv",
-        ["truenas-pydiscoveryd", "-c", str(conf), "-v"],
+        ["truenas-discoveryd", "-c", str(conf), "-v"],
     )
 
     with pytest.raises(SystemExit) as excinfo:
@@ -51,7 +51,7 @@ def test_missing_config_exits_zero(tmp_path, monkeypatch):
     missing = tmp_path / "nope.conf"
     monkeypatch.setattr(
         "sys.argv",
-        ["truenas-pydiscoveryd", "-c", str(missing), "-v"],
+        ["truenas-discoveryd", "-c", str(missing), "-v"],
     )
 
     with pytest.raises(SystemExit) as excinfo:

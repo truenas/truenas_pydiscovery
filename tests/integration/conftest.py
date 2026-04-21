@@ -1,6 +1,6 @@
 """Integration test fixtures: interface detection, daemon lifecycle.
 
-These tests start the unified ``truenas-pydiscoveryd`` daemon on a
+These tests start the unified ``truenas-discoveryd`` daemon on a
 real network interface and drive the client CLI tools via subprocess
 to validate behavior.  Requires root for ``SO_BINDTODEVICE`` and
 privileged port binding.
@@ -251,7 +251,7 @@ def _write_unified_config(
     netbiosns: dict | None = None,
     wsd: dict | None = None,
 ) -> None:
-    """Write a ``truenas-pydiscoveryd.conf`` enabling only the
+    """Write a ``truenas-discoveryd.conf`` enabling only the
     protocols that receive a (possibly empty) options dict.
     """
     cp = configparser.ConfigParser()
@@ -281,7 +281,7 @@ def _write_unified_config(
 
 @pytest.fixture
 def mdns_daemon(candidate_interface, tmp_path):
-    """Start truenas-pydiscoveryd (mDNS only) with a test service."""
+    """Start truenas-discoveryd (mDNS only) with a test service."""
     iface_name, iface_addr, _ = candidate_interface
     hostname = "pytest-mdns"
 
@@ -294,7 +294,7 @@ def mdns_daemon(candidate_interface, tmp_path):
     )
     (svc_dir / "TEST.conf").write_bytes(generate_service_config(svc))
 
-    config_path = tmp_path / "truenas-pydiscoveryd.conf"
+    config_path = tmp_path / "truenas-discoveryd.conf"
     _write_unified_config(
         config_path,
         interfaces=[iface_name],
@@ -349,7 +349,7 @@ def mdns_daemon_factory(candidate_interface, tmp_path_factory):
             fname = svc_def["name"] + ".conf"
             (svc_dir / fname).write_bytes(generate_service_config(svc))
 
-        config_path = tmp_path / "truenas-pydiscoveryd.conf"
+        config_path = tmp_path / "truenas-discoveryd.conf"
         _write_unified_config(
             config_path,
             interfaces=[iface_name],
@@ -397,7 +397,7 @@ def _start_netbiosns(
     if interfaces_token is not None:
         netbiosns_opts["interfaces"] = interfaces_token
 
-    config_path = tmp_path / "truenas-pydiscoveryd.conf"
+    config_path = tmp_path / "truenas-discoveryd.conf"
     _write_unified_config(
         config_path,
         interfaces=[iface_name],
@@ -422,7 +422,7 @@ def _start_netbiosns(
 
 @pytest.fixture
 def netbiosns_daemon(candidate_interface, has_broadcast, tmp_path):
-    """Start truenas-pydiscoveryd (NetBIOS NS only) using the iface name."""
+    """Start truenas-discoveryd (NetBIOS NS only) using the iface name."""
     if not has_broadcast:
         pytest.skip("NetBIOS NS requires broadcast-capable interface")
 
@@ -458,11 +458,11 @@ def netbiosns_daemon_factory(candidate_interface, has_broadcast, tmp_path):
 
 @pytest.fixture
 def wsd_daemon(candidate_interface, tmp_path):
-    """Start truenas-pydiscoveryd (WSD only)."""
+    """Start truenas-discoveryd (WSD only)."""
     iface_name, iface_addr, _ = candidate_interface
     hostname = "pytest-wsd"
 
-    config_path = tmp_path / "truenas-pydiscoveryd.conf"
+    config_path = tmp_path / "truenas-discoveryd.conf"
     _write_unified_config(
         config_path,
         interfaces=[iface_name],

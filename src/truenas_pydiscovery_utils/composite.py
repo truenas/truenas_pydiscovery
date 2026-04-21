@@ -3,7 +3,7 @@
 The discovery package runs mDNS, NetBIOS NS, and WSD.  Each is a
 ``BaseDaemon`` subclass with the same start/stop/reload/status
 contract.  ``CompositeDaemon`` takes a list of them and fans every
-lifecycle event across the list, so a single ``truenas-pydiscoveryd``
+lifecycle event across the list, so a single ``truenas-discoveryd``
 process can host all three while keeping the per-protocol servers
 completely unchanged.
 

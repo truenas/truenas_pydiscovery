@@ -1,7 +1,7 @@
 # truenas_pymdns.server
 
 mDNS/DNS-SD server module — runs as a child of the unified
-`truenas-pydiscoveryd` daemon.
+`truenas-discoveryd` daemon.
 
 ## Modules
 
@@ -15,13 +15,13 @@ Wire protocol types (`MDNSMessage`, `MDNSRecord`, etc.) live in the shared [`tru
 
 | Path | Purpose |
 |------|---------|
-| `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf` | Unified daemon config (`[mdns]` section) |
-| `/etc/truenas-pydiscovery/services.d/*.conf` | Service definitions (one file per service) |
-| `/run/truenas-pydiscovery/mdns/status.json` | Runtime status (written on SIGUSR1) |
+| `/etc/truenas-discovery/truenas-discoveryd.conf` | Unified daemon config (`[mdns]` section) |
+| `/etc/truenas-discovery/services.d/*.conf` | Service definitions (one file per service) |
+| `/run/truenas-discovery/mdns/status.json` | Runtime status (written on SIGUSR1) |
 
 ## mDNS configuration
 
-The `[mdns]` section in `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf`:
+The `[mdns]` section in `/etc/truenas-discovery/truenas-discoveryd.conf`:
 
 ```ini
 [mdns]
@@ -33,7 +33,7 @@ use-ipv6 = yes
 cache-entries-max = 4096
 ratelimit-interval-usec = 1000000
 ratelimit-burst = 1000
-service-dir = /etc/truenas-pydiscovery/services.d
+service-dir = /etc/truenas-discovery/services.d
 ```
 
 All keys are optional. `host-name` falls back to the shared
@@ -46,7 +46,7 @@ Each `.conf` file in the service directory defines one mDNS service. Middleware 
 
 Only `type` and `port` are required. `name` defaults to `%h` (replaced with the configured hostname at registration time). `domain` defaults to `local`. `host` defaults to the daemon's FQDN. `interfaces` limits which interfaces advertise this service. `[txt]` entries are optional key=value pairs included in the TXT record.
 
-### SMB (`/etc/truenas-pydiscovery/services.d/SMB.conf`)
+### SMB (`/etc/truenas-discovery/services.d/SMB.conf`)
 
 ```ini
 [service]
@@ -54,7 +54,7 @@ type = _smb._tcp
 port = 445
 ```
 
-### Device Info (`/etc/truenas-pydiscovery/services.d/DEV_INFO.conf`)
+### Device Info (`/etc/truenas-discovery/services.d/DEV_INFO.conf`)
 
 ```ini
 [service]
@@ -65,7 +65,7 @@ port = 9
 model = MacPro7,1@ECOLOR=226,226,224
 ```
 
-### Time Machine (`/etc/truenas-pydiscovery/services.d/ADISK.conf`)
+### Time Machine (`/etc/truenas-discovery/services.d/ADISK.conf`)
 
 ```ini
 [service]
@@ -77,7 +77,7 @@ sys = waMa=0,adVF=0x100
 dk0 = adVN=TMBackup,adVF=0x82,adVU=aabb-ccdd-eeff
 ```
 
-### Web UI with interface binding (`/etc/truenas-pydiscovery/services.d/HTTP.conf`)
+### Web UI with interface binding (`/etc/truenas-discovery/services.d/HTTP.conf`)
 
 ```ini
 [service]

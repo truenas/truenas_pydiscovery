@@ -1,4 +1,4 @@
-"""Entry point for ``truenas-pydiscoveryd``.
+"""Entry point for ``truenas-discoveryd``.
 
 Hosts mDNS, NetBIOS Name Service, and WS-Discovery in one process.
 """
@@ -20,7 +20,7 @@ from truenas_pydiscovery.config import (
 def main() -> None:
     try:
         run_daemon(
-            name="truenas-pydiscoveryd",
+            name="truenas-discoveryd",
             description=(
                 "TrueNAS unified discovery daemon "
                 "(mDNS + NetBIOS NS + WS-Discovery)"

@@ -1,6 +1,6 @@
-debian/man/truenas-pydiscoveryd.8
-debian/man/truenas-pydiscoveryd.conf.5
-debian/man/truenas-pydiscoveryd-service.conf.5
+debian/man/truenas-discoveryd.8
+debian/man/truenas-discoveryd.conf.5
+debian/man/truenas-discoveryd-service.conf.5
 debian/man/mdns-browse.1
 debian/man/mdns-resolve.1
 debian/man/mdns-lookup.1

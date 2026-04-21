@@ -2,7 +2,7 @@
 
 Pure-Python mDNS/DNS-SD implementation for TrueNAS. This package is a
 **library** — the server is launched via the unified
-`truenas-pydiscoveryd` daemon (see the top-level `README.md`), not
+`truenas-discoveryd` daemon (see the top-level `README.md`), not
 independently.
 
 ## Protocol Specifications
@@ -28,5 +28,5 @@ The following open-source projects were used as implementation references:
 ## Subpackages
 
 - [protocol/](protocol/README.md) — wire protocol: packet parsing/building, record dataclasses, traffic flow diagrams
-- [server/](server/README.md) — server module: config, probing, announcing, response scheduling. Hosted inside `truenas-pydiscoveryd`.
+- [server/](server/README.md) — server module: config, probing, announcing, response scheduling. Hosted inside `truenas-discoveryd`.
 - [client/](client/README.md) — standalone CLI tools (`mdns-browse`, `mdns-resolve`, `mdns-lookup`)

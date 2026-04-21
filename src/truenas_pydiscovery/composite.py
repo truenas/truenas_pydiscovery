@@ -2,7 +2,7 @@
 
 Each enabled protocol's existing server class is instantiated with
 its own ``DaemonConfig`` dataclass; the composite wraps them into one
-lifecycle so ``truenas-pydiscoveryd`` can host all three.
+lifecycle so ``truenas-discoveryd`` can host all three.
 """
 from __future__ import annotations
 

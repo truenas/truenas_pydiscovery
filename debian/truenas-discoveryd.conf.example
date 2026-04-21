@@ -1,11 +1,11 @@
-# Sample configuration for truenas-pydiscoveryd.
+# Sample configuration for truenas-discoveryd.
 #
 # One file drives all three protocols.  The [discovery] section
 # provides defaults used by every enabled protocol; each protocol's
 # own section can override.  Any section can be disabled by setting
 # enabled = false, or omitted entirely.
 #
-# See truenas-pydiscoveryd.conf(5) for the full field reference.
+# See truenas-discoveryd.conf(5) for the full field reference.
 
 [discovery]
 # Space- or comma-separated list of interface names.  Every protocol
@@ -19,7 +19,7 @@ interfaces = eth0
 workgroup = WORKGROUP
 
 # Runtime directory for per-protocol status files.
-# rundir = /run/truenas-pydiscovery
+# rundir = /run/truenas-discovery
 
 
 [mdns]
@@ -29,7 +29,7 @@ use-ipv6 = yes
 domain-name = local
 cache-entries-max = 4096
 enable-reflector = no
-service-dir = /etc/truenas-pydiscovery/services.d
+service-dir = /etc/truenas-discovery/services.d
 
 
 [netbiosns]

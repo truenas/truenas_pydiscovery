@@ -1,4 +1,4 @@
-"""Tests for the unified truenas-pydiscoveryd config loader."""
+"""Tests for the unified truenas-discoveryd config loader."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -204,11 +204,11 @@ workgroup = WG
 
 [wsd]
 """))
-        assert str(cfg.mdns.rundir).endswith("/truenas-pydiscovery/mdns")
+        assert str(cfg.mdns.rundir).endswith("/truenas-discovery/mdns")
         assert str(cfg.netbiosns.rundir).endswith(
-            "/truenas-pydiscovery/netbiosns",
+            "/truenas-discovery/netbiosns",
         )
-        assert str(cfg.wsd.rundir).endswith("/truenas-pydiscovery/wsd")
+        assert str(cfg.wsd.rundir).endswith("/truenas-discovery/wsd")
 
     def test_custom_rundir_base(self, tmp_path):
         cfg = load_unified_config(_write(tmp_path, f"""

@@ -100,7 +100,7 @@ class TestRegistrationBroadcastOnStartup:
         # Write config + start daemon in-background so we can run the
         # listener concurrently from the moment the daemon boots.
         netbios_name = "PYTESTHOST"
-        config_path = tmp_path / "truenas-pydiscoveryd.conf"
+        config_path = tmp_path / "truenas-discoveryd.conf"
         _write_unified_config(
             config_path,
             interfaces=[iface_name],

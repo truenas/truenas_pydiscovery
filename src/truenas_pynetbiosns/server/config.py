@@ -2,7 +2,7 @@
 
 In production the unified loader in ``truenas_pydiscovery.config``
 reads the ``[netbiosns]`` section of
-``/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf`` into the
+``/etc/truenas-discovery/truenas-discoveryd.conf`` into the
 ``DaemonConfig`` dataclass defined here.  The free-standing
 ``load_daemon_config`` function below is kept for tests and any
 caller that wants to parse an NBNS-only INI file directly.
@@ -20,9 +20,9 @@ from pathlib import Path
 # daemon — retained as the parameter default for ``load_daemon_config``
 # so tests and external callers get a predictable path).
 DEFAULT_CONFIG_PATH = Path(
-    "/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf",
+    "/etc/truenas-discovery/truenas-discoveryd.conf",
 )
-DEFAULT_RUNDIR = Path("/run/truenas-pydiscovery/netbiosns")
+DEFAULT_RUNDIR = Path("/run/truenas-discovery/netbiosns")
 NETBIOS_NAME_MAX_LEN = 15
 
 # Valid characters for NetBIOS computer names (no dots).

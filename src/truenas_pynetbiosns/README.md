@@ -2,7 +2,7 @@
 
 Pure-Python NetBIOS Name Service implementation for TrueNAS. This
 package is a **library** — the server is launched via the unified
-`truenas-pydiscoveryd` daemon (see the top-level `README.md`), not
+`truenas-discoveryd` daemon (see the top-level `README.md`), not
 independently.
 
 ## Protocol Specifications
@@ -26,7 +26,7 @@ The following open-source projects were used as implementation references:
 ## Subpackages
 
 - [protocol/](protocol/README.md) — wire protocol: packet parsing/building, name encoding, constants
-- [server/](server/README.md) — server module: config, name registration, query response, browse announcements. Hosted inside `truenas-pydiscoveryd`.
+- [server/](server/README.md) — server module: config, name registration, query response, browse announcements. Hosted inside `truenas-discoveryd`.
 - [client/](client/README.md) — CLI tools (`nbt-lookup`, `nbt-status`)
 
 ## Limitations

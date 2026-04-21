@@ -1,7 +1,7 @@
 # truenas_pywsd.server
 
 Web Services Discovery server module — runs as a child of the unified
-`truenas-pydiscoveryd` daemon.
+`truenas-discoveryd` daemon.
 
 ## Modules
 
@@ -12,12 +12,12 @@ Web Services Discovery server module — runs as a child of the unified
 
 | Path | Purpose |
 |------|---------|
-| `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf` | Unified daemon config (`[wsd]` section) |
-| `/run/truenas-pydiscovery/wsd/status.json` | Runtime status (written on SIGUSR1) |
+| `/etc/truenas-discovery/truenas-discoveryd.conf` | Unified daemon config (`[wsd]` section) |
+| `/run/truenas-discovery/wsd/status.json` | Runtime status (written on SIGUSR1) |
 
 ## WSD configuration
 
-The `[wsd]` section in `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf`:
+The `[wsd]` section in `/etc/truenas-discovery/truenas-discoveryd.conf`:
 
 ```ini
 [wsd]

@@ -1,7 +1,7 @@
 # truenas-pydiscovery
 
 Pure-Python network service discovery for TrueNAS. A single
-`truenas-pydiscoveryd` daemon hosts mDNS/DNS-SD, NetBIOS Name Service,
+`truenas-discoveryd` daemon hosts mDNS/DNS-SD, NetBIOS Name Service,
 and Web Services Discovery in one process; per-protocol client tools
 ship alongside it as thin network clients that don't need the daemon.
 
@@ -9,7 +9,7 @@ ship alongside it as thin network clients that don't need the daemon.
 
 | Package | Purpose | Role | Client Tools |
 |---------|---------|------|--------------|
-| `truenas_pydiscovery` | Unified daemon orchestrator | Entry point (`truenas-pydiscoveryd`) | — |
+| `truenas_pydiscovery` | Unified daemon orchestrator | Entry point (`truenas-discoveryd`) | — |
 | `truenas_pymdns` | mDNS/DNS-SD (RFC 6762/6763) | Library module | `mdns-browse`, `mdns-resolve`, `mdns-lookup` |
 | `truenas_pynetbiosns` | NetBIOS NS + Browser (RFC 1001/1002, MS-BRWS) | Library module | `nbt-lookup`, `nbt-status` |
 | `truenas_pywsd` | Web Services Discovery (WS-Discovery 1.1, DPWS) | Library module | `wsd-discover`, `wsd-info` |
@@ -25,7 +25,7 @@ ship alongside it as thin network clients that don't need the daemon.
 ```
 src/
   truenas_pydiscovery/          # Unified daemon orchestrator
-    server/__main__.py          # truenas-pydiscoveryd entry point
+    server/__main__.py          # truenas-discoveryd entry point
     config.py                   # Unified INI loader ([discovery] + per-protocol)
     composite.py                # Builds CompositeDaemon from enabled sections
 
@@ -69,27 +69,27 @@ shutdown (each protocol emits its own goodbye / bye / release
 frames before closing sockets).
 
 ```bash
-truenas-pydiscoveryd -c /etc/truenas-pydiscovery/truenas-pydiscoveryd.conf
+truenas-discoveryd -c /etc/truenas-discovery/truenas-discoveryd.conf
 ```
 
-Man page: [`truenas-pydiscoveryd(8)`](debian/man/truenas-pydiscoveryd.8).
+Man page: [`truenas-discoveryd(8)`](debian/man/truenas-discoveryd.8).
 
 ### systemd
 
 The Debian package installs a systemd unit at
-`/lib/systemd/system/truenas-pydiscoveryd.service` (source:
-[`debian/python3-truenas-pydiscovery.truenas-pydiscoveryd.service`](debian/python3-truenas-pydiscovery.truenas-pydiscoveryd.service)).
+`/lib/systemd/system/truenas-discoveryd.service` (source:
+[`debian/python3-truenas-pydiscovery.truenas-discoveryd.service`](debian/python3-truenas-pydiscovery.truenas-discoveryd.service)).
 Production deployments should manage the daemon via systemd rather
 than the bare binary:
 
 ```bash
-systemctl enable --now truenas-pydiscoveryd      # start on boot + now
-systemctl reload truenas-pydiscoveryd            # SIGHUP (rereads config + services.d/)
-systemctl kill -s SIGUSR1 truenas-pydiscoveryd   # dump per-protocol status JSONs
-journalctl -u truenas-pydiscoveryd -f            # follow stderr → journal
+systemctl enable --now truenas-discoveryd      # start on boot + now
+systemctl reload truenas-discoveryd            # SIGHUP (rereads config + services.d/)
+systemctl kill -s SIGUSR1 truenas-discoveryd   # dump per-protocol status JSONs
+journalctl -u truenas-discoveryd -f            # follow stderr → journal
 ```
 
-Unit highlights: runs as the unprivileged `truenas-pydiscovery`
+Unit highlights: runs as the unprivileged `truenas-discovery`
 system user (group `daemon`, created in `postinst`), with
 `AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW` so it can
 still bind 137/138/3702/5353/5357 and send raw frames. Also:
@@ -112,7 +112,7 @@ workgroup = WORKGROUP
 [mdns]
 enabled = true
 domain-name = local
-service-dir = /etc/truenas-pydiscovery/services.d
+service-dir = /etc/truenas-discovery/services.d
 
 [netbiosns]
 enabled = true
@@ -124,12 +124,12 @@ use-ipv4 = yes
 use-ipv6 = yes
 ```
 
-Man page: [`truenas-pydiscoveryd.conf(5)`](debian/man/truenas-pydiscoveryd.conf.5) — complete field reference for every key in every section.
+Man page: [`truenas-discoveryd.conf(5)`](debian/man/truenas-discoveryd.conf.5) — complete field reference for every key in every section.
 
 ### mDNS service files
 
 Individual mDNS service definitions live in the service directory
-(default `/etc/truenas-pydiscovery/services.d/`), one `.conf` per
+(default `/etc/truenas-discovery/services.d/`), one `.conf` per
 service:
 
 ```ini
@@ -138,7 +138,7 @@ type = _smb._tcp
 port = 445
 ```
 
-Man page: [`truenas-pydiscoveryd-service.conf(5)`](debian/man/truenas-pydiscoveryd-service.conf.5) — full per-file key reference and TXT-record examples.
+Man page: [`truenas-discoveryd-service.conf(5)`](debian/man/truenas-discoveryd-service.conf.5) — full per-file key reference and TXT-record examples.
 
 ### Protocol scope notes
 

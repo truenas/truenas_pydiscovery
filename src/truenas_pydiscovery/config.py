@@ -1,4 +1,4 @@
-"""Unified configuration for ``truenas-pydiscoveryd``.
+"""Unified configuration for ``truenas-discoveryd``.
 
 One INI file with a shared ``[discovery]`` section and three
 per-protocol sections (``[mdns]``, ``[netbiosns]``, ``[wsd]``).
@@ -30,9 +30,9 @@ from truenas_pywsd.server.config import (
 )
 
 DEFAULT_CONFIG_PATH = Path(
-    "/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf",
+    "/etc/truenas-discovery/truenas-discoveryd.conf",
 )
-DEFAULT_RUNDIR = Path("/run/truenas-pydiscovery")
+DEFAULT_RUNDIR = Path("/run/truenas-discovery")
 
 
 @dataclass(slots=True)

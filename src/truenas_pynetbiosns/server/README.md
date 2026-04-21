@@ -1,7 +1,7 @@
 # truenas_pynetbiosns.server
 
 NetBIOS Name Service + Browser server module — runs as a child of the
-unified `truenas-pydiscoveryd` daemon.
+unified `truenas-discoveryd` daemon.
 
 ## Modules
 
@@ -12,12 +12,12 @@ unified `truenas-pydiscoveryd` daemon.
 
 | Path | Purpose |
 |------|---------|
-| `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf` | Unified daemon config (`[netbiosns]` section) |
-| `/run/truenas-pydiscovery/netbiosns/status.json` | Runtime status (written on SIGUSR1) |
+| `/etc/truenas-discovery/truenas-discoveryd.conf` | Unified daemon config (`[netbiosns]` section) |
+| `/run/truenas-discovery/netbiosns/status.json` | Runtime status (written on SIGUSR1) |
 
 ## NetBIOS configuration
 
-The `[netbiosns]` section in `/etc/truenas-pydiscovery/truenas-pydiscoveryd.conf`:
+The `[netbiosns]` section in `/etc/truenas-discovery/truenas-discoveryd.conf`:
 
 ```ini
 [netbiosns]

@@ -2,7 +2,6 @@
 from ipaddress import IPv4Address
 
 from truenas_pymdns.protocol.constants import (
-    GOODBYE_DELAY_TTL,
     MDNSFlags,
     QType,
 )
@@ -12,7 +11,6 @@ from truenas_pymdns.protocol.records import (
     MDNSRecord,
     MDNSRecordKey,
 )
-from truenas_pymdns.server.core.cache import CacheEvent, RecordCache
 from truenas_pymdns.server.core.entry_group import EntryGroup
 
 
@@ -23,36 +21,6 @@ def _a_record(name="h.local", addr="10.0.0.1", ttl=120, cache_flush=False):
         data=ARecordData(IPv4Address(addr)),
         cache_flush=cache_flush,
     )
-
-
-class TestGoodbyeDelay:
-    """RFC 6762 s10.1: goodbye should set TTL=1, not delete immediately."""
-
-    def test_goodbye_sets_ttl_1(self):
-        cache = RecordCache()
-        cache.add(_a_record(), 100.0)
-        goodbye = _a_record(ttl=0)
-        event = cache.add(goodbye, 200.0)
-        assert event == CacheEvent.REMOVE
-        # Still in cache with TTL=1
-        results = cache.lookup(MDNSRecordKey("h.local", QType.A), 200.0)
-        assert len(results) == 1
-        assert results[0].ttl == GOODBYE_DELAY_TTL
-
-    def test_goodbye_expires_after_1s(self):
-        cache = RecordCache()
-        cache.add(_a_record(), 100.0)
-        cache.add(_a_record(ttl=0), 200.0)
-        expired = cache.expire(201.1)
-        assert len(expired) == 1
-        assert len(cache) == 0
-
-    def test_goodbye_no_match(self):
-        cache = RecordCache()
-        cache.add(_a_record(addr="10.0.0.1"), 100.0)
-        goodbye = _a_record(addr="10.0.0.99", ttl=0)
-        event = cache.add(goodbye, 200.0)
-        assert event == CacheEvent.NOOP
 
 
 class TestTCBitTruncation:

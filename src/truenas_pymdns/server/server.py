@@ -10,7 +10,6 @@ from truenas_pydiscovery_utils.status import StatusWriter
 
 from .config import DaemonConfig, get_hostname
 from .core.announcer import Announcer
-from .core.cache import RecordCache
 from .core.conflict import generate_alternative_name
 from .core.entry_group import EntryGroup
 from .core.goodbye import send_goodbye
@@ -24,7 +23,7 @@ from truenas_pymdns.protocol.constants import (
     LINK_NORMAL_PROBE_DELAY,
     QType,
 )
-from truenas_pymdns.protocol.message import MDNSMessage, MDNSQuestion
+from truenas_pymdns.protocol.message import MDNSMessage
 from truenas_pymdns.protocol.records import (
     MDNSRecord,
     MDNSRecordKey,
@@ -35,7 +34,6 @@ from .net.interface import InterfaceInfo, resolve_interface
 from .net.link_monitor import LinkMonitor
 from .net.transport import MDNSTransport
 from .query.responder import Responder
-from .query.scheduler import QueryScheduler
 from .service.file_loader import (
     load_service_directory,
     service_to_entry_group,
@@ -49,8 +47,8 @@ class PerInterfaceState:
     """Holds all per-interface mDNS state."""
 
     __slots__ = (
-        "iface", "transport", "cache",
-        "query_scheduler", "responder", "prober", "announcer",
+        "iface", "transport",
+        "responder", "prober", "announcer",
     )
 
     def __init__(self, iface: InterfaceInfo, config: DaemonConfig) -> None:
@@ -64,8 +62,6 @@ class PerInterfaceState:
             use_ipv4=config.server.use_ipv4,
             use_ipv6=config.server.use_ipv6,
         )
-        self.cache = RecordCache(config.server.cache_entries_max)
-        self.query_scheduler: QueryScheduler | None = None
         self.responder: Responder | None = None
         self.prober: Prober | None = None
         self.announcer: Announcer | None = None
@@ -83,7 +79,6 @@ class MDNSServer(BaseDaemon):
         self._registry = ServiceRegistry()
         self._entry_groups: list[EntryGroup] = []
         self._status = StatusWriter(config.rundir, logger)
-        self._maintenance_task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         # Tracks in-flight conflict-resolution tasks spawned by
         # _on_conflict() so they can be cancelled on shutdown.
@@ -120,10 +115,6 @@ class MDNSServer(BaseDaemon):
         for group in self._entry_groups:
             await self._probe_and_announce(group)
 
-        self._maintenance_task = asyncio.create_task(
-            self._maintenance_loop()
-        )
-
         # RFC 6762 §8.3 / §13 + BCT II.17 "HOT-PLUGGING": listen for
         # link state changes and re-probe all affected groups when a
         # link comes back up.  Mirrors mDNSPosix's
@@ -149,13 +140,6 @@ class MDNSServer(BaseDaemon):
             self._link_monitor.stop()
             self._link_monitor = None
 
-        if self._maintenance_task:
-            self._maintenance_task.cancel()
-            try:
-                await self._maintenance_task
-            except asyncio.CancelledError:
-                pass
-
         for task in self._conflict_tasks:
             task.cancel()
         self._conflict_tasks.clear()
@@ -173,8 +157,6 @@ class MDNSServer(BaseDaemon):
                 )
 
         for ifstate in self._interfaces.values():
-            if ifstate.query_scheduler:
-                ifstate.query_scheduler.cancel_all()
             if ifstate.responder:
                 ifstate.responder.cancel_all()
             if ifstate.prober:
@@ -212,11 +194,6 @@ class MDNSServer(BaseDaemon):
 
         if not ifstate.transport.is_active:
             return
-
-        ifstate.query_scheduler = QueryScheduler(
-            ifstate.transport.send_message, ifstate.cache,
-        )
-        ifstate.query_scheduler.start(loop)
 
         transport = ifstate.transport
 
@@ -269,27 +246,7 @@ class MDNSServer(BaseDaemon):
                     ifstate.responder.handle_probe_query(
                         message, source, ifindex,
                     )
-            if ifstate.query_scheduler:
-                for q in message.questions:
-                    ifstate.query_scheduler.on_network_question(q)
-
-            # RFC 6762 §10.5 POOF: bump the failure counter for any
-            # cached record whose name was queried.  A matching
-            # response (handled below when is_query is False) clears
-            # the counter; once the counter crosses POOF_THRESHOLD,
-            # the maintenance loop evicts the record.
-            for q in message.questions:
-                for key in ifstate.cache.keys_matching_name(q.name):
-                    ifstate.cache.record_poof(key)
         else:
-            now = time.monotonic()
-            for rr in message.answers:
-                ifstate.cache.clear_poof(rr.key)
-                ifstate.cache.add(rr, now)
-            for rr in message.additionals:
-                ifstate.cache.clear_poof(rr.key)
-                ifstate.cache.add(rr, now)
-
             if ifstate.responder:
                 ifstate.responder.suppress_if_answered(message)
             if ifstate.prober:
@@ -604,59 +561,6 @@ class MDNSServer(BaseDaemon):
                 group, announce_count=announce_count,
             )
 
-    # -- Maintenance ----------------------------------------------------------
-
-    _MAX_MAINTENANCE_SLEEP = 60.0
-
-    async def _maintenance_loop(self) -> None:
-        while True:
-            delay = self._next_maintenance_delay()
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                return
-            self._wake.clear()
-
-            now = time.monotonic()
-            for ifstate in self._interfaces.values():
-                ifstate.cache.expire(now)
-
-                refresh = ifstate.cache.get_refresh_candidates(now)
-                if refresh and ifstate.query_scheduler:
-                    for rec in refresh:
-                        ifstate.query_scheduler.schedule_query(
-                            MDNSQuestion(rec.key.name, rec.key.rtype)
-                        )
-                        rec.refresh_sent += 1
-
-                for key in ifstate.cache.get_poof_candidates():
-                    ifstate.cache.remove(key)
-
-                if ifstate.query_scheduler:
-                    ifstate.query_scheduler.sweep(now)
-
-    def _next_maintenance_delay(self) -> float:
-        """Return seconds until the nearest pending cache or scheduler
-        deadline, clamped to ``_MAX_MAINTENANCE_SLEEP`` as a safety belt.
-        """
-        now = time.monotonic()
-        soonest: float | None = None
-        for ifstate in self._interfaces.values():
-            for candidate in (
-                ifstate.cache.next_event_at(),
-                ifstate.query_scheduler.next_sweep_at()
-                if ifstate.query_scheduler else None,
-            ):
-                if candidate is None:
-                    continue
-                if soonest is None or candidate < soonest:
-                    soonest = candidate
-        if soonest is None:
-            return self._MAX_MAINTENANCE_SLEEP
-        return max(0.0, min(soonest - now, self._MAX_MAINTENANCE_SLEEP))
-
     # -- Reload ---------------------------------------------------------------
 
     async def _reload(self) -> None:
@@ -679,8 +583,6 @@ class MDNSServer(BaseDaemon):
         # ifstate refs — otherwise their TimerHandles and Tasks survive
         # the clear() and keep firing against closed transports.
         for ifstate in self._interfaces.values():
-            if ifstate.query_scheduler:
-                ifstate.query_scheduler.cancel_all()
             if ifstate.responder:
                 ifstate.responder.cancel_all()
             if ifstate.prober:
@@ -718,7 +620,6 @@ class MDNSServer(BaseDaemon):
                 "ipv4": [str(a) for a in ifstate.iface.addrs_v4],
                 "ipv6": [str(a) for a in ifstate.iface.addrs_v6],
                 "multicast_joined": ifstate.transport.is_active,
-                "cache": ifstate.cache.stats(),
             }
 
         services = []

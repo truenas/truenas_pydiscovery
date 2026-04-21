@@ -1,4 +1,4 @@
-"""Tests for core engine: cache, entry_group, conflict."""
+"""Tests for core engine: entry_group, conflict."""
 import pytest
 from ipaddress import IPv4Address, IPv6Address
 
@@ -9,11 +9,9 @@ from truenas_pymdns.protocol.constants import (
 )
 from truenas_pymdns.protocol.records import (
     ARecordData,
-    AAAARecordData,
     MDNSRecord,
     MDNSRecordKey,
 )
-from truenas_pymdns.server.core.cache import CacheEvent, RecordCache
 from truenas_pymdns.server.core.conflict import (
     generate_alternative_name,
     lexicographic_compare,
@@ -29,138 +27,6 @@ def _a_record(name="myhost.local", addr="192.168.1.1", ttl=120,
         data=ARecordData(IPv4Address(addr)),
         cache_flush=cache_flush,
     )
-
-
-class TestRecordCache:
-    def test_add_new(self):
-        cache = RecordCache()
-        rec = _a_record()
-        event = cache.add(rec, 1000.0)
-        assert event == CacheEvent.NEW
-        assert len(cache) == 1
-
-    def test_add_update(self):
-        cache = RecordCache()
-        rec1 = _a_record(ttl=120)
-        cache.add(rec1, 1000.0)
-        rec2 = _a_record(ttl=240)
-        event = cache.add(rec2, 1050.0)
-        assert event == CacheEvent.UPDATE
-        assert len(cache) == 1
-
-    def test_add_new_rdata(self):
-        cache = RecordCache()
-        rec1 = _a_record(addr="192.168.1.1")
-        cache.add(rec1, 1000.0)
-        rec2 = _a_record(addr="192.168.1.2")
-        event = cache.add(rec2, 1000.0)
-        assert event == CacheEvent.NEW
-        assert len(cache) == 2
-
-    def test_goodbye_delays_removal(self):
-        """RFC 6762 s10.1: goodbye sets TTL=1, record expires 1s later."""
-        cache = RecordCache()
-        rec = _a_record()
-        cache.add(rec, 1000.0)
-        goodbye = _a_record(ttl=0)
-        event = cache.add(goodbye, 1050.0)
-        assert event == CacheEvent.REMOVE
-        # Record still present with TTL=1 (not immediately deleted)
-        assert len(cache) == 1
-        # Expires after 1 second
-        expired = cache.expire(1051.1)
-        assert len(expired) == 1
-        assert len(cache) == 0
-
-    def test_expire(self):
-        cache = RecordCache()
-        rec = _a_record(ttl=60)
-        cache.add(rec, 1000.0)
-        assert len(cache) == 1
-        expired = cache.expire(1059.0)
-        assert len(expired) == 0
-        expired = cache.expire(1061.0)
-        assert len(expired) == 1
-        assert len(cache) == 0
-
-    def test_lookup(self):
-        cache = RecordCache()
-        rec = _a_record()
-        cache.add(rec, 1000.0)
-        results = cache.lookup(MDNSRecordKey("myhost.local", QType.A), 1000.0)
-        assert len(results) == 1
-        assert results[0].data.address == IPv4Address("192.168.1.1")
-
-    def test_lookup_expired_excluded(self):
-        cache = RecordCache()
-        rec = _a_record(ttl=10)
-        cache.add(rec, 1000.0)
-        results = cache.lookup(MDNSRecordKey("myhost.local", QType.A), 1020.0)
-        assert len(results) == 0
-
-    def test_lookup_name(self):
-        cache = RecordCache()
-        cache.add(_a_record(), 1000.0)
-        cache.add(MDNSRecord(
-            key=MDNSRecordKey("myhost.local", QType.AAAA),
-            ttl=120,
-            data=AAAARecordData(IPv6Address("fe80::1")),
-        ), 1000.0)
-        results = cache.lookup_name("myhost.local", 1000.0)
-        assert len(results) == 2
-
-    def test_cache_flush_bit(self):
-        cache = RecordCache()
-        rec1 = _a_record(addr="192.168.1.1")
-        cache.add(rec1, 1000.0)
-        rec2 = _a_record(addr="192.168.1.2", cache_flush=True)
-        cache.add(rec2, 1001.0)
-        # rec1 should now have ttl=1 (about to expire)
-        assert len(cache) == 2
-        expired = cache.expire(1003.0)
-        assert len(expired) == 1
-        assert expired[0].data.address == IPv4Address("192.168.1.1")
-        assert len(cache) == 1
-
-    def test_max_entries_eviction(self):
-        cache = RecordCache(max_entries=3)
-        for i in range(5):
-            rec = _a_record(addr=f"10.0.0.{i}")
-            cache.add(rec, 1000.0 + i)
-        assert len(cache) <= 3
-
-    def test_poof(self):
-        cache = RecordCache()
-        key = MDNSRecordKey("test.local", QType.A)
-        # POOF is only tracked for keys present in the cache
-        rec = _a_record(name="test.local", ttl=120)
-        cache.add(rec, 1000.0)
-        cache.record_poof(key)
-        assert cache.get_poof_candidates() == []
-        cache.record_poof(key)
-        assert key in cache.get_poof_candidates()
-        cache.clear_poof(key)
-        assert cache.get_poof_candidates() == []
-
-    def test_known_answers(self):
-        cache = RecordCache()
-        rec = _a_record(ttl=120)
-        cache.add(rec, 1000.0)
-        # At 50% TTL should be included
-        answers = cache.known_answers_for("myhost.local", QType.A, 1050.0)
-        assert len(answers) == 1
-        # At 90% TTL, remaining_ttl is 12 which is < 120//2=60, so excluded
-        answers = cache.known_answers_for("myhost.local", QType.A, 1110.0)
-        assert len(answers) == 0
-
-    def test_refresh_candidates(self):
-        cache = RecordCache()
-        rec = _a_record(ttl=100)
-        cache.add(rec, 0.0)
-        candidates = cache.get_refresh_candidates(79.0)
-        assert len(candidates) == 0
-        candidates = cache.get_refresh_candidates(81.0)
-        assert len(candidates) == 1
 
 
 class TestConflict:

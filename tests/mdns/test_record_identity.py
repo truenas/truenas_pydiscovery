@@ -51,7 +51,6 @@ class TestMDNSRecordIdentity:
         b = _host_a()
         b.cache_flush = False
         b.created_at = 999.0
-        b.refresh_sent = 3
         assert a == b
         assert hash(a) == hash(b)
 
@@ -60,7 +59,6 @@ class TestMDNSRecordIdentity:
         s = {a}
         a.ttl = 999
         a.created_at = 123.0
-        a.refresh_sent = 5
         # Set membership uses hash → __eq__.  Both must still
         # produce the same result after mutation of metadata.
         assert a in s

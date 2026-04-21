@@ -140,14 +140,6 @@ MULTICAST_RATE_LIMIT = 1.0
 TC_DEFER_MIN = 0.400
 TC_DEFER_MAX = 0.500
 
-# TTL refresh queries (RFC 6762 s5.2): at 80%, 85%, 90%, 95% of TTL
-# Each with +2% random jitter
-TTL_REFRESH_AT = (0.80, 0.85, 0.90, 0.95)
-TTL_REFRESH_JITTER = 0.02
-
-# POOF threshold (RFC 6762 passive observation of failure)
-POOF_THRESHOLD = 2
-
 # Conflict rate limiting (RFC 6762 s8.1):
 #   If 15 conflicts in 10 seconds, wait 5 seconds before next probe
 CONFLICT_RATE_WINDOW = 10.0
@@ -156,9 +148,6 @@ CONFLICT_RATE_BACKOFF = 5.0
 
 # Legacy response TTL cap (RFC 6762 s6.7)
 LEGACY_RESPONSE_TTL_CAP = 10
-
-# Goodbye delay (RFC 6762 s10.1): set TTL=1, expire 1s later
-GOODBYE_DELAY_TTL = 1
 
 # Typical Ethernet MTU minus IP+UDP headers
 MDNS_MAX_PACKET_SIZE = 1460

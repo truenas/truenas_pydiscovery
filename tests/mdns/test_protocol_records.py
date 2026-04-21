@@ -241,13 +241,3 @@ class TestMDNSRecord:
         )
         # A(1) < AAAA(28), so r1 wins (negative)
         assert r1.lexicographic_cmp(r2) < 0
-
-    def test_next_refresh_time(self):
-        rec = self._make_a_record(ttl=100)
-        rec.created_at = 0.0
-        rec.refresh_sent = 0
-        assert rec.next_refresh_time() == 80.0
-        rec.refresh_sent = 1
-        assert rec.next_refresh_time() == 85.0
-        rec.refresh_sent = 4
-        assert rec.next_refresh_time() is None

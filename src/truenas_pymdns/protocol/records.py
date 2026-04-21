@@ -48,7 +48,7 @@ import struct
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address
 
-from .constants import CLASS_CACHE_FLUSH, QClass, QType, TTL_REFRESH_AT, TXT_MAX_ENTRY_LENGTH
+from .constants import CLASS_CACHE_FLUSH, QClass, QType, TXT_MAX_ENTRY_LENGTH
 from .name import decode_name, encode_name
 
 
@@ -375,7 +375,6 @@ class MDNSRecord:
     data: RecordData
     cache_flush: bool = False
     created_at: float = 0.0
-    refresh_sent: int = 0
 
     def __eq__(self, other: object) -> bool:
         """RFC 6762 / Apple ``IdenticalResourceRecord``
@@ -390,8 +389,8 @@ class MDNSRecord:
     def __hash__(self) -> int:
         """Stable across the record's lifetime: ``key`` is
         frozen, ``data`` is frozen with a pre-computed hash, and
-        the mutable metadata fields (``ttl``, ``created_at``,
-        ``refresh_sent``) aren't in the hash tuple."""
+        the mutable metadata fields (``ttl``, ``created_at``)
+        aren't in the hash tuple."""
         return hash((self.key, self.data))
 
     def to_wire(self, buf: bytearray,
@@ -454,16 +453,6 @@ class MDNSRecord:
         """Return the remaining TTL in seconds, clamped to zero."""
         remaining = self.ttl - (now - self.created_at)
         return max(0, int(remaining))
-
-    def next_refresh_time(self) -> float | None:
-        """Return monotonic time for next TTL refresh query (RFC 6762 s5.2).
-
-        Refresh queries are sent at 80%, 85%, 90%, 95% of the original TTL.
-        """
-        if self.refresh_sent >= len(TTL_REFRESH_AT):
-            return None
-        fraction = TTL_REFRESH_AT[self.refresh_sent]
-        return self.created_at + self.ttl * fraction
 
     # -- Conflict resolution (RFC 6762 s8.2) ---------------------------------
 

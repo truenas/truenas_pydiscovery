@@ -1,0 +1,87 @@
+.TH TRUENAS\-DISCOVERYD\-SERVICE.CONF 5 "2026-04-20" "truenas-pydiscovery" "File Formats"
+.SH NAME
+truenas\-pydiscoveryd\-service.conf \- mDNS service definition file
+.SH SYNOPSIS
+.I /etc/truenas\-pydiscovery/services.d/*.conf
+.SH DESCRIPTION
+Each \fB.conf\fP file in the services directory defines one mDNS/DNS\-SD
+service to be advertised by
+.BR truenas\-pydiscoveryd (8).
+The directory path is set by the
+.B service\-dir
+key in the
+.B [mdns]
+section of
+.BR truenas\-pydiscoveryd.conf (5).
+Middleware writes these files; the daemon reads them on startup and
+on SIGHUP reload.
+.PP
+Only \fBtype\fP and \fBport\fP are required.
+.SH SECTIONS
+.SS [service]
+.TP
+.B type
+DNS\-SD service type.
+Must start with underscore.
+Example: \fB_smb._tcp\fP, \fB_http._tcp\fP, \fB_adisk._tcp\fP.
+Required.
+.TP
+.B port
+TCP or UDP port number (0\(en65535).
+Required.
+.TP
+.B name
+Service instance name.
+Default: \fB%h\fP (replaced with the configured hostname).
+.TP
+.B domain
+mDNS domain for this service.
+Default: \fBlocal\fP.
+.TP
+.B host
+Target hostname for the SRV record.
+Default: daemon's FQDN.
+.TP
+.B interfaces
+Comma\-separated list of interfaces to advertise this service on.
+Default: all configured interfaces.
+.TP
+.B priority
+SRV record priority (0\(en65535).
+Default: \fB0\fP.
+.TP
+.B weight
+SRV record weight (0\(en65535).
+Default: \fB0\fP.
+.SS [txt]
+Optional key=value pairs included in the TXT record (RFC\ 6763\ s6).
+Each key becomes one TXT entry.
+.SH EXAMPLES
+SMB file sharing:
+.nf
+[service]
+type = _smb._tcp
+port = 445
+.fi
+.PP
+Time Machine:
+.nf
+[service]
+type = _adisk._tcp
+port = 9
+
+[txt]
+sys = waMa=0,adVF=0x100
+dk0 = adVN=TMBackup,adVF=0x82,adVU=aabb\-ccdd\-eeff
+.fi
+.PP
+Web UI on specific interface:
+.nf
+[service]
+type = _http._tcp
+port = 443
+interfaces = eth0
+.fi
+.SH SEE ALSO
+.BR truenas\-pydiscoveryd (8),
+.BR truenas\-pydiscoveryd.conf (5)

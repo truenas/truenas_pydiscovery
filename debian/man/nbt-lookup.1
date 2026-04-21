@@ -1,0 +1,66 @@
+.TH NBT\-LOOKUP 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+nbt\-lookup \- resolve a NetBIOS name to IP addresses
+.SH SYNOPSIS
+.B nbt\-lookup
+.RB [ \-\-type
+.IR TYPE ]
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.I NAME
+.SH DESCRIPTION
+.B nbt\-lookup
+sends a NetBIOS name query via UDP broadcast and prints the
+IP addresses from any positive responses.
+Similar to
+.BR nmblookup (1).
+.PP
+No daemon is required.
+.SH OPTIONS
+.TP
+.I NAME
+NetBIOS name to look up.
+.TP
+.BI \-\-type " TYPE"
+NetBIOS name type suffix, case-insensitive:
+.B WORKSTATION
+(0x00),
+.B MASTER_BROWSER
+(0x01),
+.B MESSENGER
+(0x03),
+.B DOMAIN_MASTER
+(0x1B),
+.B DOMAIN_CONTROLLER
+(0x1C),
+.B LOCAL_MASTER
+(0x1D),
+.B BROWSER_ELECTION
+(0x1E),
+.B SERVER
+(0x20).
+An integer literal (e.g. \fB0x41\fP, \fB65\fP) is also accepted for
+name types not in the enum.
+Default: \fBSERVER\fP.
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Query timeout in seconds.
+Default: 2.0.
+.TP
+.BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
+Interface IP address to send from.
+.TP
+.B \-\-json
+Output as JSONL (one JSON object per result).
+.SH EXAMPLES
+.nf
+nbt\-lookup TRUENAS
+nbt\-lookup MYHOST \-\-type WORKSTATION
+nbt\-lookup FILESVR \-\-json
+.fi
+.SH SEE ALSO
+.BR nbt\-status (1),
+.BR truenas\-netbiosns (8)

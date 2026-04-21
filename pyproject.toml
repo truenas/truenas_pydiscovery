@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "truenas-pydiscovery"
+version = "0.1.0"
+description = "TrueNAS network service discovery daemons (mDNS, NetBIOS-NS, WSD)"
+requires-python = ">=3.11"
+authors = [
+    {name = "TrueNAS Engineering", email = "dev@truenas.com"},
+]
+license = {text = "LGPL-3.0-or-later"}
+dependencies = ["defusedxml"]
+
+[project.scripts]
+truenas-discoveryd = "truenas_pydiscovery.server.__main__:main"
+mdns-browse = "truenas_pymdns.client.cli.browse:main"
+mdns-resolve = "truenas_pymdns.client.cli.resolve:main"
+mdns-lookup = "truenas_pymdns.client.cli.lookup:main"
+nbt-lookup = "truenas_pynetbiosns.client.cli.lookup:main"
+nbt-status = "truenas_pynetbiosns.client.cli.status:main"
+wsd-discover = "truenas_pywsd.client.cli.discover:main"
+wsd-info = "truenas_pywsd.client.cli.info:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests requiring real network and root",
+    "broadcast: tests requiring broadcast-capable interface",
+]
+
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+check_untyped_defs = true

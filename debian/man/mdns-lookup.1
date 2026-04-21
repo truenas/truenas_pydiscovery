@@ -1,0 +1,50 @@
+.TH MDNS\-LOOKUP 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+mdns\-lookup \- look up a named mDNS service instance
+.SH SYNOPSIS
+.B mdns\-lookup
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.I NAME SERVICE_TYPE
+.RI [ DOMAIN ]
+.SH DESCRIPTION
+.B mdns\-lookup
+resolves a named service instance to its contact information:
+hostname, port, and TXT records.
+Equivalent to
+.BR "dns\-sd \-L" .
+.PP
+No daemon is required.
+.SH OPTIONS
+.TP
+.I NAME
+Service instance name (e.g.\ \fBTN26NEW\fP).
+.TP
+.I SERVICE_TYPE
+Service type (e.g.\ \fB_http._tcp\fP).
+.TP
+.I DOMAIN
+Domain.
+Default: \fBlocal\fP.
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Query timeout in seconds.
+Default: 3.0.
+.TP
+.BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
+Interface IPv4 address to send queries from.
+.TP
+.B \-\-json
+Output as JSON.
+.SH EXAMPLES
+.nf
+mdns\-lookup TN26NEW _http._tcp
+mdns\-lookup "My NAS" _smb._tcp local \-\-json
+.fi
+.SH SEE ALSO
+.BR mdns\-browse (1),
+.BR mdns\-resolve (1),
+.BR truenas\-mdnsd (8)

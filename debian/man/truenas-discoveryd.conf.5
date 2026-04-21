@@ -1,0 +1,160 @@
+.TH TRUENAS\-DISCOVERYD.CONF 5 "2026-04-17" "truenas-pydiscovery" "File Formats"
+.SH NAME
+truenas\-pydiscoveryd.conf \- configuration for truenas\-pydiscoveryd(8)
+.SH SYNOPSIS
+.I /etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf
+.SH DESCRIPTION
+INI\-format configuration file.
+A shared
+.B [discovery]
+section supplies default values for any of the three per\-protocol
+sections
+.RB ( [mdns] ,
+.BR [netbiosns] ,
+.BR [wsd] ).
+Each per\-protocol section has an
+.B enabled
+key; if set to
+.BR false ,
+.BR no ,
+or
+.BR 0 ,
+that protocol is not started.
+Missing sections are treated as disabled.  At least one of the three
+protocols must be enabled or the daemon refuses to start.
+.SH SECTION [discovery]
+.TP
+.B interfaces
+Comma\- or space\-separated list of interface names all enabled
+protocols should bind to by default.
+.TP
+.B hostname
+Default hostname advertised by every protocol.
+If unset, each protocol falls back to the system hostname.
+.TP
+.B workgroup
+Default workgroup name used by the NetBIOS NS and WSD protocols.
+.TP
+.B rundir
+Base runtime directory (default
+.IR /run/truenas\-pydiscovery ).
+Each protocol's own rundir sits under this as
+.IR mdns ,
+.IR netbiosns ,
+.IR wsd .
+.SH SECTION [mdns]
+.TP
+.B enabled
+.BR true " (default) or " false .
+.TP
+.B interfaces
+Override of the shared list for mDNS only.
+.TP
+.B host-name
+Override hostname for mDNS only.
+.TP
+.B domain-name
+mDNS domain, typically
+.BR local .
+.TP
+.BR use-ipv4 ", " use-ipv6
+.BR yes " / " no .
+.TP
+.B cache-entries-max
+Maximum cache records per interface (default
+.BR 4096 ).
+.TP
+.B enable-reflector
+Cross\-interface reflector mode (default
+.BR no ).
+.TP
+.B service-dir
+Directory containing service definition files (default
+.IR /etc/truenas\-pydiscovery/services.d ).
+.SH SECTION [netbiosns]
+.TP
+.B enabled
+.BR true " (default) or " false .
+.TP
+.B interfaces
+Override of the shared list.
+The NetBIOS section accepts three token forms in this list,
+resolved at daemon startup against the live network state:
+.RS
+.IP \(bu 3
+Interface name (\fBeth0\fR) \(em every local IPv4 address on that
+interface becomes a separate broadcast domain the daemon participates in.
+.IP \(bu 3
+Bare IPv4 (\fB10.0.0.5\fR) \(em just the one local address.
+.IP \(bu 3
+CIDR (\fB192.168.1.0/24\fR) \(em every local address inside this
+network; the user\-supplied prefix overrides the kernel netmask
+for the matched addresses, following Samba\(cq\(cq\&s
+\fBinterpret_interface\fR behaviour.
+.RE
+.IP
+Each resolved entry is one broadcast domain
+(analogous to Samba\(cq\(cq\&s \fBsubnet_record\fR).
+A single interface with IPv4 addresses in two subnets yields two
+entries; the daemon registers the configured names on every entry.
+Tokens that do not resolve to any local address cause startup to fail.
+.TP
+.B netbios-name
+Primary 15\-char NetBIOS name.
+Defaults to the system hostname, uppercased and truncated.
+.TP
+.B netbios-aliases
+Comma\-separated additional NetBIOS names to register.
+.TP
+.B workgroup
+Workgroup / domain name (overrides shared value).
+.TP
+.B server-string
+Free\-form server description for browse announcements (truncated to
+43 bytes).
+.SH SECTION [wsd]
+.TP
+.B enabled
+.BR true " (default) or " false .
+.TP
+.B interfaces
+Override of the shared list.
+.TP
+.B hostname
+Override hostname for WSD only.
+.TP
+.B workgroup
+Overrides shared workgroup.
+.TP
+.B domain
+AD domain name, if any.
+.TP
+.BR use-ipv4 ", " use-ipv6
+.BR yes " / " no .
+.SH EXAMPLE
+.RS
+.nf
+[discovery]
+interfaces = eth0 eth1
+hostname = TRUENAS
+workgroup = WORKGROUP
+
+[mdns]
+enabled = true
+use-ipv4 = yes
+use-ipv6 = yes
+domain-name = local
+
+[netbiosns]
+enabled = true
+server-string = TrueNAS Server
+
+[wsd]
+enabled = true
+use-ipv4 = yes
+use-ipv6 = yes
+.fi
+.RE
+.SH SEE ALSO
+.BR truenas\-pydiscoveryd (8),
+.BR truenas\-mdnsd\-service.conf (5)

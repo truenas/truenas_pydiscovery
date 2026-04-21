@@ -1,0 +1,10 @@
+debian/man/truenas-discoveryd.8
+debian/man/truenas-discoveryd.conf.5
+debian/man/truenas-discoveryd-service.conf.5
+debian/man/mdns-browse.1
+debian/man/mdns-resolve.1
+debian/man/mdns-lookup.1
+debian/man/nbt-lookup.1
+debian/man/nbt-status.1
+debian/man/wsd-discover.1
+debian/man/wsd-info.1

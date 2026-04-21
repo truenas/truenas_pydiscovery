@@ -1,0 +1,80 @@
+name: Build and Test
+
+on:
+  pull_request:
+    branches: [ master ]
+  push:
+    branches: [ master ]
+
+jobs:
+  build-test:
+    # Debian Trixie matches our packaging target (debian/changelog
+    # declares ``unstable``) and ships Python ≥ 3.11 per our
+    # ``pyproject.toml`` requires-python.
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      # NET_ADMIN is needed for ``ip link add type dummy`` in the
+      # setup-test-interface step below.  Minimal escalation —
+      # ``--privileged`` is NOT required.  Docker's default cap set
+      # strips NET_ADMIN; we add it back explicitly.
+      options: --cap-add=NET_ADMIN
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build + test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential devscripts debhelper \
+            dh-python pybuild-plugin-pyproject \
+            python3-all python3-all-dev python3-setuptools \
+            python3-defusedxml \
+            python3-pytest python3-pytest-cov \
+            python3-flake8 python3-mypy \
+            adduser
+
+      # Run lint/type checks against the source tree BEFORE the
+      # expensive build — fail fast on style/type errors.
+      #
+      # Invoke as ``python3 -m`` because Debian splits the ``flake8``
+      # / ``mypy`` /usr/bin wrappers into separate binary packages —
+      # ``python3-flake8`` and ``python3-mypy`` ship only the
+      # Python modules, which are callable via ``-m`` without
+      # pulling in the extra wrapper packages.
+      - name: flake8
+        run: python3 -m flake8 --max-line-length=110 src/
+
+      - name: mypy
+        run: python3 -m mypy src/
+
+      - name: Build Debian package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Install built Debian package
+        # ``dpkg-buildpackage`` drops the ``.deb`` one level up from
+        # the source tree.  We install it into the container so the
+        # subsequent pytest run exercises the INSTALLED package
+        # (``/usr/lib/python3/dist-packages/truenas_pymdns`` etc.)
+        # rather than the ``src/`` tree.
+        run: dpkg -i ../python3-truenas-pydiscovery_*.deb
+
+      - name: Configure dummy test interface
+        # Create a Linux dummy netdev that the integration-test
+        # fixture (``tests/integration/conftest.py:_find_candidate_interface``)
+        # will discover via SIOCGIFCONF.  See the script for
+        # rationale — deterministic IP, isolated from the Docker
+        # bridge, no nondeterministic multicast-snooping quirks.
+        run: bash .github/workflows/scripts/setup-test-interface.sh
+
+      # Pytest's default ``sys.path`` doesn't include ``src/`` (no
+      # ``pythonpath`` entry in ``pyproject.toml``), so imports of
+      # ``truenas_pymdns`` / ``truenas_pynetbiosns`` / ``truenas_pywsd``
+      # resolve to the just-installed system copy.  All tests run —
+      # unit, component, and integration (the dummy interface above
+      # satisfies the integration fixture's UP+BROADCAST+MULTICAST
+      # requirement).
+      - name: pytest
+        run: python3 -m pytest tests/ -v

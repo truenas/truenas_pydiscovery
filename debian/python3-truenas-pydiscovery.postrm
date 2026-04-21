@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+if [ "$1" = "purge" ]; then
+    if getent passwd truenas-discovery >/dev/null; then
+        deluser --quiet --system truenas-discovery >/dev/null || true
+    fi
+    # /run/truenas-discovery is managed by systemd's RuntimeDirectory=
+    # and normally vanishes on service stop, but clean up any remnant
+    # (e.g. if the package is purged while the host is shut down).
+    if [ -d /run/truenas-discovery ]; then
+        rm -rf /run/truenas-discovery
+    fi
+fi
+
+exit 0

@@ -1,0 +1,77 @@
+.TH TRUENAS\-DISCOVERYD 8 "2026-04-17" "truenas-pydiscovery" "System Administration"
+.SH NAME
+truenas\-pydiscoveryd \- TrueNAS unified network discovery daemon
+.SH SYNOPSIS
+.B truenas\-pydiscoveryd
+.RB [ \-c
+.IR CONFIG ]
+.RB [ \-v ]
+.SH DESCRIPTION
+.B truenas\-pydiscoveryd
+is a single process that hosts three network discovery protocols
+in one Python event loop:
+.TP
+\(bu
+mDNS / DNS\-SD (RFC\ 6762, RFC\ 6763)
+.TP
+\(bu
+NetBIOS Name Service and Browser (RFC\ 1001, RFC\ 1002, MS\-BRWS)
+.TP
+\(bu
+WS\-Discovery 1.1 (OASIS) with Microsoft PBSD extensions
+.PP
+Each protocol is independently supervised: a failure in one does not
+bring down the others.  Each can be individually disabled via its
+section's
+.B enabled = false
+flag in the configuration file.
+.SH OPTIONS
+.TP
+.BI \-c " CONFIG" "\fR,\fP \-\-config " CONFIG
+Path to configuration file.
+Default: \fI/etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf\fP.
+.TP
+.BR \-v ", " \-\-verbose
+Increase log verbosity.
+Use once for INFO, twice for DEBUG.
+Without this flag, logging goes to syslog.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload configuration across every enabled protocol.
+Each protocol re\-resolves interfaces, reloads local state, and
+re\-announces.
+.TP
+.B SIGUSR1
+Write runtime status for every enabled protocol to its per\-protocol
+status.json under \fI/run/truenas\-pydiscovery\fP.
+.TP
+.BR SIGTERM ", " SIGINT
+Graceful shutdown: each protocol sends its goodbye / release / bye
+frames and closes sockets.
+.SH FILES
+.TP
+.I /etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf
+Unified daemon configuration (INI format).
+.TP
+.I /etc/truenas\-pydiscovery/services.d/*.conf
+mDNS service definition files (one per service).
+.TP
+.I /run/truenas\-pydiscovery/mdns/status.json
+mDNS runtime status (SIGUSR1).
+.TP
+.I /run/truenas\-pydiscovery/netbiosns/status.json
+NetBIOS NS runtime status.
+.TP
+.I /run/truenas\-pydiscovery/wsd/status.json
+WS\-Discovery runtime status.
+.SH SEE ALSO
+.BR truenas\-pydiscoveryd.conf (5),
+.BR truenas\-mdnsd\-service.conf (5),
+.BR mdns\-browse (1),
+.BR mdns\-lookup (1),
+.BR mdns\-resolve (1),
+.BR nbt\-lookup (1),
+.BR nbt\-status (1),
+.BR wsd\-discover (1),
+.BR wsd\-info (1)

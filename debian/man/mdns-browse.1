@@ -1,0 +1,54 @@
+.TH MDNS\-BROWSE 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+mdns\-browse \- browse for mDNS/DNS\-SD services
+.SH SYNOPSIS
+.B mdns\-browse
+.RB [ \-a ]
+.RB [ \-r ]
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.RI [ SERVICE_TYPE ]
+.SH DESCRIPTION
+.B mdns\-browse
+sends mDNS queries directly on the network to discover services.
+It runs continuously, printing newly discovered services as they appear,
+until interrupted with Ctrl\-C or the timeout expires.
+.PP
+No daemon is required.
+Queries use the QU (unicast\-response) bit on an ephemeral port.
+.SH OPTIONS
+.TP
+.I SERVICE_TYPE
+Service type to browse (e.g.\ \fB_http._tcp\fP).
+.TP
+.BR \-a ", " \-\-all
+Browse for all service types via the
+.I _services._dns\-sd._udp
+meta\-query.
+.TP
+.BR \-r ", " \-\-resolve
+Auto\-resolve each discovered service to show hostname, port,
+addresses, and TXT records.
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Total browse duration in seconds.
+Default: run until Ctrl\-C.
+.TP
+.BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
+Interface IPv4 address to send queries from.
+.TP
+.B \-\-json
+Output as JSONL (one JSON object per line per discovered service).
+.SH EXAMPLES
+.nf
+mdns\-browse _http._tcp
+mdns\-browse \-\-all \-\-resolve
+mdns\-browse _smb._tcp \-\-json \-t 10
+.fi
+.SH SEE ALSO
+.BR mdns\-resolve (1),
+.BR mdns\-lookup (1),
+.BR truenas\-mdnsd (8)

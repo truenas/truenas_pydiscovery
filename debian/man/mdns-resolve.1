@@ -1,0 +1,58 @@
+.TH MDNS\-RESOLVE 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+mdns\-resolve \- resolve mDNS names
+.SH SYNOPSIS
+.B mdns\-resolve
+.BR \-n " \fIHOSTNAME\fP"
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.br
+.B mdns\-resolve
+.BR \-s " \fINAME TYPE\fP"
+.RB [ \-d
+.IR DOMAIN ]
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.SH DESCRIPTION
+.B mdns\-resolve
+sends mDNS queries directly on the network to resolve hostnames
+or service instances.
+No daemon is required.
+.SH OPTIONS
+.TP
+.BI \-n " HOSTNAME" "\fR,\fP \-\-name " HOSTNAME
+Resolve a hostname to IP addresses (A/AAAA lookup).
+Example: \fBmyhost.local\fP.
+.TP
+.BI \-s " NAME TYPE" "\fR,\fP \-\-service \fINAME TYPE\fP"
+Resolve a service instance to hostname, port, addresses, and TXT records.
+Example: \fB\-s 'My NAS' _smb._tcp\fP.
+.TP
+.BI \-d " DOMAIN" "\fR,\fP \-\-domain " DOMAIN
+Domain for service resolution.
+Default: \fBlocal\fP.
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Query timeout in seconds.
+Default: 3.0.
+.TP
+.BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
+Interface IPv4 address to send queries from.
+.TP
+.B \-\-json
+Output as JSON.
+.SH EXAMPLES
+.nf
+mdns\-resolve \-n truenas.local
+mdns\-resolve \-s "TrueNAS" _smb._tcp \-\-json
+.fi
+.SH SEE ALSO
+.BR mdns\-browse (1),
+.BR mdns\-lookup (1),
+.BR truenas\-mdnsd (8)

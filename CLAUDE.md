@@ -52,7 +52,7 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 
 - Pure Python, stdlib only -- except `defusedxml` for WSD XML parsing (XXE prevention)
 - Python >= 3.11
-- Source layout: `src/` with five packages (`truenas_pydiscovery`, `truenas_pymdns`, `truenas_pynetbiosns`, `truenas_pywsd`, `truenas_pydiscovery_utils`). The mDNS/NetBIOS/WSD packages are libraries; the server is the single `truenas-pydiscoveryd` entry point in `truenas_pydiscovery.server.__main__:main`.
+- Source layout: `src/` with five packages (`truenas_pydiscovery`, `truenas_pymdns`, `truenas_pynetbiosns`, `truenas_pywsd`, `truenas_pydiscovery_utils`). The mDNS/NetBIOS/WSD packages are libraries; the server is the single `truenas-discoveryd` entry point in `truenas_pydiscovery.server.__main__:main`.
 - `ctypes` usage is not accepted
 - Prefer Python `enum` types where possible
 - `from __future__ import annotations` in every module

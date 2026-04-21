@@ -1,0 +1,42 @@
+.TH WSD\-DISCOVER 1 "2026-04-15" "truenas-pydiscovery" "User Commands"
+.SH NAME
+wsd\-discover \- discover WSD devices on the local network
+.SH SYNOPSIS
+.B wsd\-discover
+.RB [ \-t
+.IR TIMEOUT ]
+.RB [ \-r ]
+.RB [ \-i
+.IR ADDR ]
+.RB [ \-\-json ]
+.SH DESCRIPTION
+.B wsd\-discover
+sends a WS\-Discovery Probe via UDP multicast and lists all
+responding devices with their endpoint references and metadata
+endpoint URLs (XAddrs).
+.PP
+No daemon is required.
+.SH OPTIONS
+.TP
+.BI \-t " TIMEOUT" "\fR,\fP \-\-timeout " TIMEOUT
+Discovery timeout in seconds.
+Default: 4.0.
+.TP
+.BR \-r ", " \-\-resolve
+Fetch metadata (FriendlyName, Computer, Manufacturer) for each
+discovered device via HTTP.
+.TP
+.BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
+Interface IPv4 address to send from.
+.TP
+.B \-\-json
+Output as JSONL (one JSON object per discovered device).
+.SH EXAMPLES
+.nf
+wsd\-discover
+wsd\-discover \-\-resolve \-\-json
+wsd\-discover \-t 10 \-i 192.168.1.100
+.fi
+.SH SEE ALSO
+.BR wsd\-info (1),
+.BR truenas\-wsd (8)

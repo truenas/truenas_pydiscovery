@@ -284,10 +284,18 @@ class TXTRecordData(RecordData):
 
     def __post_init__(self) -> None:
         # RFC 6763 §6.5: TXT values are case-sensitive — no folding.
-        # ``entries`` is already a tuple, so we use it verbatim as the
-        # identity tuple.
-        object.__setattr__(self, "_identity", self.entries)
-        object.__setattr__(self, "_hash", hash(self.entries))
+        # Normalise empty ``entries`` to ``(b"",)`` — RFC 6763 §6
+        # requires at least one (possibly empty) string on the wire,
+        # so ``from_wire`` always produces ``(b"",)`` for an empty
+        # TXT.  If we store the same record as ``entries=()`` the
+        # identity tuple disagrees with the parsed form and every
+        # self-echo of an empty TXT (``IP_MULTICAST_LOOP=1``) looks
+        # like a conflict.  Canonicalising here keeps equality
+        # symmetric across the wire boundary.
+        entries = self.entries if self.entries else (b"",)
+        object.__setattr__(self, "entries", entries)
+        object.__setattr__(self, "_identity", entries)
+        object.__setattr__(self, "_hash", hash(entries))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TXTRecordData):

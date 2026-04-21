@@ -114,11 +114,19 @@ class TestTXTRecordData:
         assert rd.entries == orig.entries
 
     def test_empty_txt(self):
+        """RFC 6763 §6 requires at least one (possibly empty) string on
+        the wire.  ``TXTRecordData`` canonicalises ``entries=()`` to
+        ``(b"",)`` so wire round-trip is an equality-preserving
+        identity."""
         orig = TXTRecordData(entries=())
+        assert orig.entries == (b"",)
         wire = orig.to_wire()
         assert wire == b"\x00"
         rd = TXTRecordData.from_wire(wire)
         assert rd.entries == (b"",)
+        # Round-trip equality — this is what the conflict detector
+        # relies on for self-echo suppression.
+        assert rd == orig
 
     def test_complex_txt_values(self):
         """ADISK-style TXT records with commas and equals in values."""

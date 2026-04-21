@@ -10,6 +10,7 @@ import asyncio
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from ipaddress import IPv4Interface
 
 from truenas_pywsd.protocol.constants import (
     Action,
@@ -24,6 +25,11 @@ from truenas_pywsd.protocol.constants import (
 from truenas_pywsd.protocol.soap import SOAPEnvelope
 from truenas_pywsd.server.core.dedup import MessageDedup
 from truenas_pywsd.server.core.responder import WSDResponder
+
+# All tests in this module send from 10.0.0.9; give the responder an
+# interface address on the same /24 so the on-link filter admits the
+# source.
+_ADDRS_V4 = [IPv4Interface("10.0.0.1/24")]
 
 
 def _run(coro, timeout: float = 5.0) -> object:
@@ -84,7 +90,10 @@ class TestProbeResponseJitter:
         cap = _Capture()
         endpoint_uuid = str(uuid.uuid4())
         dedup = MessageDedup()
-        responder = WSDResponder(cap, endpoint_uuid, "http://x", dedup)
+        responder = WSDResponder(
+            cap, endpoint_uuid, "http://x", dedup,
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
+        )
 
         saw_delay = False
 
@@ -117,6 +126,7 @@ class TestProbeResponseJitter:
         endpoint_uuid = str(uuid.uuid4())
         responder = WSDResponder(
             cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
         )
 
         async def drive() -> None:
@@ -144,6 +154,7 @@ class TestUnicastRetransmit:
         endpoint_uuid = str(uuid.uuid4())
         responder = WSDResponder(
             cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
         )
 
         async def drive() -> None:
@@ -163,6 +174,7 @@ class TestUnicastRetransmit:
         endpoint_uuid = str(uuid.uuid4())
         responder = WSDResponder(
             cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
         )
 
         async def drive() -> None:
@@ -190,6 +202,7 @@ class TestResolveResponse:
         endpoint_uuid = str(uuid.uuid4())
         responder = WSDResponder(
             cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
         )
 
         async def drive() -> None:
@@ -209,6 +222,7 @@ class TestResolveResponse:
         endpoint_uuid = str(uuid.uuid4())
         responder = WSDResponder(
             cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
         )
 
         async def drive() -> None:

@@ -9,6 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from ipaddress import (
+    IPv4Address,
+    IPv4Interface,
+    IPv6Address,
+    IPv6Interface,
+    ip_address,
+)
 from typing import Callable
 
 from truenas_pywsd.protocol.constants import (
@@ -37,7 +44,53 @@ SendUnicastFn = Callable[[bytes, tuple], None]
 
 
 class WSDResponder:
-    """Responds to WSD Probe and Resolve messages."""
+    """Responds to WSD Probe and Resolve messages.
+
+    **On-link source filter.**  ``handle_message`` drops any Probe or
+    Resolve whose source IP isn't reachable on the interface we're
+    listening on (see ``_is_on_link``).  The purpose is to remove this
+    responder from the set of UDP reflectors available to a
+    cross-subnet attacker: a spoofed Probe with ``src = victim`` from
+    off-link would otherwise elicit ``UNICAST_UDP_REPEAT`` replies
+    aimed at the victim.
+
+    The filter is spec-consistent:
+
+    * WS-Discovery 1.1 §3.1.1 pairs port 3702 with the link-local
+      multicast group ``ff02::c`` (IPv6) and the administratively-
+      scoped ``239.255.255.250`` (IPv4, paired with SOAP-over-UDP
+      1.1 §3.3's TTL=1 recommendation).  The protocol is designed
+      to be link-local.
+    * WS-Discovery 1.1 §8.1 explicitly permits a Target Service to
+      decline responding to a Probe/Resolve whose client is "in a
+      different administrative domain" — the textual hook for this
+      kind of filtering.
+
+    **Known limitation — directed unicast Probes (§5.2.2).**
+    WS-Discovery 1.1 §5.2.2 allows a Target Service to accept a
+    unicast Probe sent directly to its transport address (not via
+    the multicast group).  A legitimate off-link client that
+    already knows our ``XAddrs`` may do this, and our filter will
+    silently drop its Probe.  If that scenario ever matters, the
+    fix is to upgrade the transport from ``recvfrom`` to
+    ``recvmsg`` with ``IP_PKTINFO`` / ``IPV6_PKTINFO``, inspect the
+    destination address on the incoming datagram, and skip the
+    on-link check when the destination is our unicast interface
+    address (as opposed to the multicast group).  None of the three
+    widely-used WSD daemons surveyed (christgau/wsdd, wsdd-native,
+    c_wsd) implements either the on-link filter or the §5.2.2
+    accommodation, so this is a novel-but-principled hardening.
+
+    **Known limitation — same-link attackers.**  An attacker already
+    on our link can spoof a source IP inside our subnet and still
+    get amplified replies aimed at another on-link host.  The
+    ``IP_TTL=1`` / ``IPV6_UNICAST_HOPS=1`` caps on the unicast send
+    sockets (see ``net/transport.py``) confine any reflected traffic
+    to the link, but cannot prevent same-link reflection.  This is
+    inherent to unauthenticated UDP discovery on a shared broadcast
+    domain — same-link attackers already have direct access and
+    don't need our amplification.
+    """
 
     def __init__(
         self,
@@ -45,12 +98,17 @@ class WSDResponder:
         endpoint_uuid: str,
         xaddrs: str,
         dedup: MessageDedup,
+        *,
+        addrs_v4: list[IPv4Interface],
+        addrs_v6: list[IPv6Interface],
         scopes: list[str] | None = None,
     ) -> None:
         self._send_unicast = send_unicast_fn
         self._endpoint_uuid = endpoint_uuid
         self._xaddrs = xaddrs
         self._dedup = dedup
+        self._addrs_v4 = list(addrs_v4)
+        self._addrs_v6 = list(addrs_v6)
         # WS-Discovery 1.1 §5.1: scopes this device advertises.
         # Empty list means we match every scoped probe implicitly —
         # hosts that want scope filtering must configure scopes
@@ -58,11 +116,49 @@ class WSDResponder:
         self._scopes: list[str] = list(scopes or [])
         self._tasks: list[asyncio.Task] = []
 
+    def _is_on_link(self, source: tuple) -> bool:
+        """Return True if *source* is reachable on our interface.
+
+        Decision rules:
+
+        * IPv4: source ∈ any of our configured IPv4 networks.
+        * IPv6 link-local (``fe80::/10``): always True.  ``fe80::/10``
+          is per-interface and our receive socket is scoped to a
+          single interface via ``SO_BINDTODEVICE``; any reply we send
+          to a link-local destination cannot leave the link
+          physically, so off-link reflection via forged link-local
+          sources is impossible.
+        * IPv6 global / ULA: source ∈ any of our configured IPv6
+          networks.
+
+        A source that fails to parse or isn't covered by any rule is
+        rejected.  Fail-safe: an interface configured without any
+        addresses answers nothing.
+        """
+        try:
+            addr = ip_address(source[0])
+        except (ValueError, IndexError):
+            return False
+        if isinstance(addr, IPv4Address):
+            return any(addr in a.network for a in self._addrs_v4)
+        if isinstance(addr, IPv6Address):
+            if addr.is_link_local:
+                return True
+            return any(addr in a.network for a in self._addrs_v6)
+        return False
+
     def handle_message(
         self, envelope: SOAPEnvelope, source: tuple,
     ) -> None:
         """Process a parsed SOAP envelope and schedule response if needed."""
         if self._dedup.is_duplicate(envelope.message_id):
+            return
+
+        if not self._is_on_link(source):
+            logger.debug(
+                "Dropping off-link %s from %s",
+                envelope.action, source[0] if source else "?",
+            )
             return
 
         if envelope.action == Action.PROBE:

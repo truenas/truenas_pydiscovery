@@ -11,6 +11,7 @@ import asyncio
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from ipaddress import IPv4Interface
 
 import pytest
 
@@ -27,6 +28,8 @@ from truenas_pywsd.protocol.messages import (
 from truenas_pywsd.protocol.soap import SOAPEnvelope
 from truenas_pywsd.server.core.dedup import MessageDedup
 from truenas_pywsd.server.core.responder import WSDResponder
+
+_ADDRS_V4 = [IPv4Interface("10.0.0.1/24")]
 
 
 class TestScopeMatchesPure:
@@ -139,6 +142,7 @@ class TestResponderScopeFiltering:
 
         resp = WSDResponder(
             send, str(uuid.uuid4()), "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
             scopes=["http://example.com/floor1"],
         )
         return resp, cap
@@ -184,6 +188,7 @@ class TestResponderScopeFiltering:
         resp = WSDResponder(
             lambda d, a: cap.append((d, a)),
             str(uuid.uuid4()), "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
             scopes=["http://example.com/floor1"],
         )
 

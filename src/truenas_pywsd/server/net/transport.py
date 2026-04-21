@@ -182,6 +182,24 @@ class WSDTransport:
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1,
             )
+            # Cap unicast replies to one hop.  This is the second layer
+            # of the UDP-reflection / amplification defence (first
+            # layer: ``_is_on_link`` in ``core/responder.py``).  The
+            # attack is: adversary sends a spoofed Probe with
+            # ``src = victim`` to our port; we reply
+            # ``UNICAST_UDP_REPEAT`` times to ``victim``, using this
+            # host as an amplifying reflector against a third party.
+            # ``_is_on_link`` refuses off-link sources; TTL=1 is the
+            # backstop — even if an attacker forges an on-link source
+            # address and slips past the subnet filter, the reply
+            # cannot be routed beyond the local link, so no off-link
+            # victim is reachable.  Spec hooks: SOAP-over-UDP 1.1 §3.3
+            # RECOMMENDS TTL=1 in a multicast-scoping context; we
+            # extend the same bound to unicast because WS-Discovery
+            # 1.1 is link-scoped by design (§3.1.1 — ``ff02::c`` is
+            # link-local, ``239.255.255.250`` is paired with §3.3's
+            # TTL=1 recommendation).
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
             if self._ifaddr_v4:
                 sock.setsockopt(
@@ -225,6 +243,15 @@ class WSDTransport:
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             sock.setsockopt(
                 socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 1,
+            )
+            # Cap unicast replies to one hop — same UDP-reflection
+            # defence rationale as the IPv4 socket above.  ``ff02::c``
+            # is normatively link-local (WS-Discovery 1.1 §3.1.1), so
+            # a legitimate unicast reply never needs to cross a
+            # router; an off-link victim therefore can't be reached
+            # even if an attacker forges an on-link source.
+            sock.setsockopt(
+                socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, 1,
             )
             sock.setsockopt(
                 socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 0,

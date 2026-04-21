@@ -171,8 +171,8 @@ class WSDServer(BaseDaemon):
         ifaces = {}
         for ifstate in self._interfaces.values():
             ifaces[ifstate.iface.name] = {
-                "ipv4": [str(a) for a in ifstate.iface.addrs_v4],
-                "ipv6": [str(a) for a in ifstate.iface.addrs_v6],
+                "ipv4": [str(a.ip) for a in ifstate.iface.addrs_v4],
+                "ipv6": [str(a.ip) for a in ifstate.iface.addrs_v6],
                 "transport_active": (
                     ifstate.transport.is_active
                     if ifstate.transport else False
@@ -203,8 +203,13 @@ class WSDServer(BaseDaemon):
         transport = WSDTransport(
             interface_index=iface.index,
             interface_name=iface.name,
+            # IP_MULTICAST_IF takes exactly one source address; the
+            # primary is a sensible default even when the interface
+            # carries multiple subnets (clients see our multicast
+            # regardless — the per-subnet reachability is solved by
+            # the multi-URL XAddrs in ``_build_xaddrs``).
             interface_addr_v4=(
-                str(iface.addrs_v4[0]) if iface.addrs_v4 else None
+                str(iface.addrs_v4[0].ip) if iface.addrs_v4 else None
             ),
             use_ipv4=self._config.server.use_ipv4,
             use_ipv6=self._config.server.use_ipv6,
@@ -222,6 +227,8 @@ class WSDServer(BaseDaemon):
             endpoint_uuid=self._endpoint_uuid,
             xaddrs=xaddrs,
             dedup=ifstate.dedup,
+            addrs_v4=iface.addrs_v4,
+            addrs_v6=iface.addrs_v6,
         )
 
         # Metadata handler for HTTP
@@ -238,10 +245,14 @@ class WSDServer(BaseDaemon):
             is_domain=is_domain,
         )
 
-        # Start HTTP server on each address
-        for addr in iface.addrs_v4:
+        # Bind a metadata HTTP server on every IPv4 address so clients
+        # on any of this interface's subnets can reach the URL we
+        # advertise in XAddrs.
+        for iface_addr in iface.addrs_v4:
             http = WSDHttpServer(
-                str(addr), WSD_HTTP_PORT, meta_handler.handle_request,
+                str(iface_addr.ip),
+                WSD_HTTP_PORT,
+                meta_handler.handle_request,
             )
             await http.start()
             ifstate.http_servers.append(http)
@@ -279,11 +290,19 @@ class WSDServer(BaseDaemon):
         return self._message_number
 
     def _build_xaddrs(self, iface: InterfaceInfo) -> str:
-        """Build the XAddrs string for metadata exchange."""
+        """Build the ``wsd:XAddrs`` string for metadata exchange.
+
+        WS-Discovery 1.1 §5.3 defines ``XAddrs`` as a whitespace-
+        separated list of transport addresses.  When an interface has
+        multiple IPv4 addresses (one per subnet), we advertise one
+        URL per address so a client on any of those subnets gets a
+        reachable metadata endpoint — otherwise secondary-subnet
+        clients receive a URL they can't route to.
+        """
         if iface.addrs_v4:
-            addr = str(iface.addrs_v4[0])
-            return (
-                f"http://{addr}:{WSD_HTTP_PORT}"
-                f"/{self._endpoint_uuid}"
-            )
+            urls = [
+                f"http://{a.ip}:{WSD_HTTP_PORT}/{self._endpoint_uuid}"
+                for a in iface.addrs_v4
+            ]
+            return " ".join(urls)
         return ""

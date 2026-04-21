@@ -407,7 +407,12 @@ class MDNSServer(BaseDaemon):
                 rr.key.name, rr.key.rtype, ifindex,
             )
             for ow in our_owned:
-                if ow.record.rdata_wire() == rr.rdata_wire():
+                # RFC 6762 §16: case-insensitive rdata comparison for
+                # name-bearing types (PTR/SRV targets).  Byte-exact
+                # ``rdata_wire()`` would miss compression-driven case
+                # differences when our own packets echo back via
+                # IP_MULTICAST_LOOP.
+                if ow.record.data == rr.data:
                     if rr.ttl < ow.record.ttl // 2:
                         ifstate = self._interfaces.get(ifindex)
                         if ifstate and ifstate.announcer:
@@ -435,16 +440,26 @@ class MDNSServer(BaseDaemon):
         # from ours for at least one UNIQUE (cache-flush) record we
         # own on this interface.  Shared records (e.g. service PTR)
         # can coexist; different rdata is not a conflict for them.
+        #
+        # RFC 6762 §16 requires case-insensitive rdata comparison for
+        # name-bearing record types (PTR/SRV target) — ``data ==``
+        # delegates to ``RecordData._identity`` which case-folds
+        # appropriately.  A byte-exact ``rdata_wire()`` compare would
+        # flag our own multicast-loopback echo as a conflict whenever
+        # name compression re-encodes a target in a different case
+        # than our in-memory copy (e.g. ``MDNSRecordKey`` lowercases
+        # the A record's name field, so a compression pointer
+        # referencing it yields the lowercase form while our stored
+        # ``PTRRecordData.target`` preserves the original casing).
         conflicts: set[tuple[str, QType]] = set()
         for rr in message.answers:
             owned = self._registry.lookup(
                 rr.key.name, rr.key.rtype, ifindex,
             )
-            peer_rdata = rr.rdata_wire()
             for ow in owned:
                 if not ow.record.cache_flush:
                     continue
-                if ow.record.rdata_wire() == peer_rdata:
+                if ow.record.data == rr.data:
                     continue
                 conflicts.add((rr.key.name.lower(), rr.key.rtype))
                 break

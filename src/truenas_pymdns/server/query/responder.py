@@ -162,10 +162,13 @@ class Responder:
         """
         now = time.monotonic()
         for rr in message.answers:
-            peer_rdata = rr.rdata_wire()
+            # RFC 6762 §16: compare rdata case-insensitively for
+            # name-bearing record types.  ``RecordData.__eq__`` uses
+            # ``_identity`` (case-folded for PTR/SRV targets,
+            # byte-exact for A/AAAA/TXT per their respective specs).
             matches = [
                 ow for ow in self._registry.lookup(rr.key.name, rr.key.rtype)
-                if ow.record.rdata_wire() == peer_rdata
+                if ow.record.data == rr.data
             ]
             if not matches:
                 continue

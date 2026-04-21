@@ -106,12 +106,21 @@ class NBNSTransport:
                 self._ifname, self._ifaddr, self._bcast,
             )
 
-        # Port 138 — Datagram Service (unicast + subnet-bcast)
+        # Port 138 — Datagram Service (unicast + subnet-bcast).
+        # We open the sockets unconditionally so ``send_dgram_broadcast``
+        # has a bound source address, but register them with the event
+        # loop only when a ``dgram_handler`` is provided.  Registering
+        # an fd with ``add_reader`` on a socket we never ``recvfrom``
+        # pegs the event loop at 100% CPU: level-triggered epoll
+        # marks the fd readable, we enter the callback, short-circuit
+        # because the handler is ``None``, return without draining,
+        # kernel re-signals readable on the next loop tick, repeat.
         if self._enable_dgram:
             self._sock_dgram_unicast = self._open_or_log(
                 self._ifaddr, DGRAM_PORT, "DGRAM unicast",
             )
-            if self._sock_dgram_unicast is not None:
+            if (self._sock_dgram_unicast is not None
+                    and dgram_handler is not None):
                 loop.add_reader(
                     self._sock_dgram_unicast.fileno(),
                     self._on_readable_dgram_unicast,
@@ -119,14 +128,17 @@ class NBNSTransport:
             self._sock_dgram_bcast = self._open_or_log(
                 self._bcast, DGRAM_PORT, "DGRAM subnet-bcast",
             )
-            if self._sock_dgram_bcast is not None:
+            if (self._sock_dgram_bcast is not None
+                    and dgram_handler is not None):
                 loop.add_reader(
                     self._sock_dgram_bcast.fileno(),
                     self._on_readable_dgram_bcast,
                 )
             if self._sock_dgram_unicast is not None:
                 logger.info(
-                    "DGRAM transport up on %s", self._ifname,
+                    "DGRAM transport up on %s%s", self._ifname,
+                    "" if dgram_handler is not None
+                    else " (send-only — no dgram handler)",
                 )
 
     async def stop(self) -> None:

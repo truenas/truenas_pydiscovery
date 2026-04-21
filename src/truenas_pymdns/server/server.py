@@ -253,7 +253,7 @@ class MDNSServer(BaseDaemon):
                 ifstate.prober.handle_incoming(message, source)
 
             self._check_cooperating_responders(message, ifindex)
-            self._check_established_conflicts(message, ifindex)
+            self._check_established_conflicts(message, ifindex, source)
 
         self._wake.set()
 
@@ -414,7 +414,7 @@ class MDNSServer(BaseDaemon):
                             ifstate.announcer.schedule_announce([ow.record])
 
     def _check_established_conflicts(
-        self, message: MDNSMessage, ifindex: int,
+        self, message: MDNSMessage, ifindex: int, source: tuple = (),
     ) -> None:
         """RFC 6762 §9 / BCT II.6 "SUBSEQUENT CONFLICT".
 
@@ -466,9 +466,16 @@ class MDNSServer(BaseDaemon):
             )
             if not matched:
                 continue
+            src_desc = (
+                f"{source[0]}" if source else "unknown"
+            )
             logger.warning(
-                "RFC 6762 §9: peer rdata conflict on established "
-                "record — resetting group to probing state (same name)"
+                "RFC 6762 §9: peer rdata conflict from %s on %s — "
+                "resetting group to probing state (same name)",
+                src_desc,
+                sorted(
+                    name for name, _rt in conflicts
+                ),
             )
             self._registry.remove_group(group)
             group.set_state(EntryGroupState.UNCOMMITTED)

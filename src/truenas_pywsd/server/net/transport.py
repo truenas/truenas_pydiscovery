@@ -256,14 +256,19 @@ class WSDTransport:
             sock.setsockopt(
                 socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 0,
             )
+            # ``@I`` packs the ifindex in native byte order.  Linux's
+            # ``IPV6_MULTICAST_IF`` and the ``ipv6_mreq::ipv6mr_ifindex``
+            # field are host-byte-order ``int``s — ``!I`` (network
+            # byte order) silently fails with ENODEV on little-endian
+            # hosts because the kernel sees a byte-swapped value.
             sock.setsockopt(
                 socket.IPPROTO_IPV6,
                 socket.IPV6_MULTICAST_IF,
-                struct.pack("!I", self._ifindex),
+                struct.pack("@I", self._ifindex),
             )
             # Join multicast group
             group_bin = socket.inet_pton(socket.AF_INET6, WSD_MCAST_V6)
-            mreq = group_bin + struct.pack("!I", self._ifindex)
+            mreq = group_bin + struct.pack("@I", self._ifindex)
             sock.setsockopt(
                 socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq,
             )

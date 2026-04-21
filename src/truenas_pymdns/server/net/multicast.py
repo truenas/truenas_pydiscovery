@@ -84,11 +84,15 @@ def create_v6_socket(
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, MDNS_TTL)
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, MDNS_TTL)
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
-        # Set outgoing multicast interface by index
+        # Set outgoing multicast interface by index.  ``@I`` = native-
+        # endian unsigned int: Linux's ``IPV6_MULTICAST_IF`` takes a
+        # host-byte-order ``int``.  Using ``!I`` (network byte order)
+        # would byte-swap the ifindex on little-endian hosts and the
+        # kernel would reject the socket option with ENODEV.
         sock.setsockopt(
             socket.IPPROTO_IPV6,
             socket.IPV6_MULTICAST_IF,
-            struct.pack("!I", interface_index),
+            struct.pack("@I", interface_index),
         )
         # Receive hop limit in ancillary data
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVHOPLIMIT, 1)
@@ -131,9 +135,15 @@ def join_multicast_v6(
     sock: socket.socket, interface_index: int,
     group: str = MDNS_IPV6_GROUP,
 ) -> None:
-    """Join an IPv6 multicast group on a specific interface."""
+    """Join an IPv6 multicast group on a specific interface.
+
+    ``@I`` packs the ifindex in native byte order — the
+    ``ipv6_mreq::ipv6mr_ifindex`` field is a host-byte-order ``int``.
+    Using ``!I`` (network byte order) here silently fails with
+    ENODEV on little-endian hosts.
+    """
     group_bin = socket.inet_pton(socket.AF_INET6, group)
-    mreq = group_bin + struct.pack("!I", interface_index)
+    mreq = group_bin + struct.pack("@I", interface_index)
     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
 
 
@@ -141,7 +151,8 @@ def leave_multicast_v6(
     sock: socket.socket, interface_index: int,
     group: str = MDNS_IPV6_GROUP,
 ) -> None:
-    """Leave an IPv6 multicast group."""
+    """Leave an IPv6 multicast group.  See ``join_multicast_v6`` for
+    the byte-order rationale on the ifindex."""
     group_bin = socket.inet_pton(socket.AF_INET6, group)
-    mreq = group_bin + struct.pack("!I", interface_index)
+    mreq = group_bin + struct.pack("@I", interface_index)
     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)

@@ -15,27 +15,23 @@ Accepted token forms (mirroring Samba's ``interpret_interface``):
   network; user-supplied netmask overrides the kernel's for the entry.
 
 Unresolvable tokens raise ``ValueError``.
+
+Broadcast-address limitation: broadcast is derived from the
+address prefix (``IPv4Network.broadcast_address``), which matches
+the kernel default for every standard deployment.  Custom
+broadcasts configured via ``ip addr add .../24 broadcast <custom>``
+are not preserved — the standard all-ones broadcast is used.
 """
 from __future__ import annotations
 
-import array
-import fcntl
 import logging
 import socket
-import struct
-import sys
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 
+from truenas_pydiscovery_utils.netlink_addr import enumerate_all_addresses
+
 logger = logging.getLogger(__name__)
-
-SIOCGIFCONF = 0x8912
-SIOCGIFNETMASK = 0x891B
-SIOCGIFBRDADDR = 0x8919
-
-# Linux struct ifreq: 16-byte ifr_name + ifr_ifru union.  Union size is
-# dominated by struct ifmap on 64-bit (24 bytes); 16 bytes on 32-bit.
-_IFREQ_SIZE = 40 if sys.maxsize > 2**32 else 32
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,72 +57,26 @@ class _ProbedAddr:
     broadcast: IPv4Address
 
 
-def _siocgifconf() -> list[tuple[str, IPv4Address]]:
-    """Return every (ifname, IPv4 address) pair the kernel exposes.
-
-    Secondary addresses added via ``ip addr add`` show up as additional
-    entries with the same ifname.  IPv4 only — NetBIOS NS has no IPv6.
-    """
-    max_bytes = 16384
-    addr_buf = array.array("B", b"\0" * max_bytes)
-    buf_addr, _ = addr_buf.buffer_info()
-    ifconf = struct.pack("iL", max_bytes, buf_addr)
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        result = fcntl.ioctl(s.fileno(), SIOCGIFCONF, ifconf)
-    finally:
-        s.close()
-
-    used_bytes = struct.unpack("iL", result)[0]
-    raw = addr_buf.tobytes()[:used_bytes]
-
-    out: list[tuple[str, IPv4Address]] = []
-    for offset in range(0, used_bytes, _IFREQ_SIZE):
-        chunk = raw[offset:offset + _IFREQ_SIZE]
-        if len(chunk) < 24:
-            break
-        name = chunk[:16].split(b"\0", 1)[0].decode("utf-8", errors="replace")
-        family = struct.unpack("<H", chunk[16:18])[0]
-        if family != socket.AF_INET:
-            continue
-        out.append((name, IPv4Address(chunk[20:24])))
-    return out
-
-
-def _ioctl_ipv4(
-    sock: socket.socket, ifname: str, op: int,
-) -> IPv4Address | None:
-    """Extract the IPv4 address returned by an ifname-keyed ioctl."""
-    ifreq = struct.pack("256s", ifname.encode("utf-8")[:15])
-    try:
-        result = fcntl.ioctl(sock.fileno(), op, ifreq)
-    except OSError:
-        return None
-    return IPv4Address(result[20:24])
-
-
 def probe_addresses() -> list[_ProbedAddr]:
-    """Enumerate local IPv4 addresses with their netmask and broadcast."""
-    pairs = _siocgifconf()
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probed: list[_ProbedAddr] = []
-        for name, ip in pairs:
-            try:
-                idx = socket.if_nametoindex(name)
-            except OSError:
-                continue
-            mask = _ioctl_ipv4(s, name, SIOCGIFNETMASK)
-            bcast = _ioctl_ipv4(s, name, SIOCGIFBRDADDR)
-            if mask is None or bcast is None:
-                continue
+    """Enumerate local IPv4 addresses with their netmask and broadcast.
+
+    Broadcast is derived from the address prefix — see the module
+    docstring for the limitation on custom broadcasts.
+    """
+    probed: list[_ProbedAddr] = []
+    for ifindex, addrs in enumerate_all_addresses().items():
+        try:
+            ifname = socket.if_indextoname(ifindex)
+        except OSError:
+            continue
+        for iface in addrs.v4:
             probed.append(_ProbedAddr(
-                ifname=name, ifindex=idx, ip=ip,
-                netmask=mask, broadcast=bcast,
+                ifname=ifname,
+                ifindex=ifindex,
+                ip=iface.ip,
+                netmask=IPv4Address(int(iface.network.netmask)),
+                broadcast=iface.network.broadcast_address,
             ))
-    finally:
-        s.close()
     return probed
 
 

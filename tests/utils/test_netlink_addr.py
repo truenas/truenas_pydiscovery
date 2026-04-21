@@ -26,7 +26,9 @@ from truenas_pydiscovery_utils.netlink_addr import (
     NLMSG_DONE,
     RTM_NEWADDR,
     enumerate_addresses,
+    enumerate_all_addresses,
     parse_dump,
+    parse_dump_all,
 )
 
 
@@ -247,3 +249,83 @@ class TestEnumerateLoopback:
                 assert iface.network.prefixlen == 8
         if addrs.v6:
             assert any(str(a.ip) == "::1" for a in addrs.v6)
+
+
+# -- parse_dump_all: system-wide parser --------------------------------
+
+
+class TestParseDumpAll:
+    def test_empty_buffer_produces_empty_dict(self):
+        assert parse_dump_all(b"") == {}
+
+    def test_single_interface(self):
+        buf = _pack_newaddr(
+            family=socket.AF_INET, prefixlen=24, ifindex=7,
+            addr_bytes=IPv4Address("10.0.0.1").packed,
+            use_local_attr=True,
+        ) + _pack_done()
+        result = parse_dump_all(buf)
+        assert set(result.keys()) == {7}
+        assert result[7].v4[0].ip == IPv4Address("10.0.0.1")
+
+    def test_two_interfaces_bucketed_separately(self):
+        """One dump containing addresses on two ifindexes must return
+        a two-entry dict with addresses routed to the right bucket."""
+        buf = (
+            _pack_newaddr(
+                family=socket.AF_INET, prefixlen=24, ifindex=2,
+                addr_bytes=IPv4Address("10.0.0.1").packed,
+                use_local_attr=True,
+            )
+            + _pack_newaddr(
+                family=socket.AF_INET, prefixlen=24, ifindex=3,
+                addr_bytes=IPv4Address("192.168.1.1").packed,
+                use_local_attr=True,
+            )
+            + _pack_newaddr(
+                family=socket.AF_INET6, prefixlen=64, ifindex=2,
+                addr_bytes=IPv6Address("2001:db8::1").packed,
+            )
+            + _pack_done()
+        )
+        result = parse_dump_all(buf)
+        assert set(result.keys()) == {2, 3}
+        assert [str(a.ip) for a in result[2].v4] == ["10.0.0.1"]
+        assert [str(a.ip) for a in result[2].v6] == ["2001:db8::1"]
+        assert [str(a.ip) for a in result[3].v4] == ["192.168.1.1"]
+
+    def test_tentative_addresses_skipped_across_all_interfaces(self):
+        buf = (
+            _pack_newaddr(
+                family=socket.AF_INET, prefixlen=24, ifindex=2,
+                addr_bytes=IPv4Address("10.0.0.1").packed,
+                use_local_attr=True,
+                flags32=IFA_F_TENTATIVE,
+            )
+            + _pack_newaddr(
+                family=socket.AF_INET, prefixlen=24, ifindex=3,
+                addr_bytes=IPv4Address("192.168.1.1").packed,
+                use_local_attr=True,
+            )
+            + _pack_done()
+        )
+        result = parse_dump_all(buf)
+        assert set(result.keys()) == {3}
+
+
+# -- Live enumerate_all_addresses smoke test ---------------------------
+
+
+class TestEnumerateAllAddresses:
+    def test_loopback_visible_in_system_dump(self):
+        """``enumerate_all_addresses`` must surface ``lo``'s
+        ``127.0.0.1/8`` alongside any other interfaces present on the
+        host — one netlink round trip covering everything."""
+        try:
+            lo_index = socket.if_nametoindex("lo")
+        except OSError:
+            pytest.skip("no loopback interface (exotic net-ns)")
+        everything = enumerate_all_addresses()
+        assert lo_index in everything
+        lo = everything[lo_index]
+        assert any(str(a.ip) == "127.0.0.1" for a in lo.v4)

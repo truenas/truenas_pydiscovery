@@ -70,16 +70,13 @@ class WSDResponder:
     WS-Discovery 1.1 §5.2.2 allows a Target Service to accept a
     unicast Probe sent directly to its transport address (not via
     the multicast group).  A legitimate off-link client that
-    already knows our ``XAddrs`` may do this, and our filter will
-    silently drop its Probe.  If that scenario ever matters, the
-    fix is to upgrade the transport from ``recvfrom`` to
-    ``recvmsg`` with ``IP_PKTINFO`` / ``IPV6_PKTINFO``, inspect the
-    destination address on the incoming datagram, and skip the
-    on-link check when the destination is our unicast interface
-    address (as opposed to the multicast group).  None of the three
-    widely-used WSD daemons surveyed (christgau/wsdd, wsdd-native,
-    c_wsd) implements either the on-link filter or the §5.2.2
-    accommodation, so this is a novel-but-principled hardening.
+    already knows our ``XAddrs`` may do this, and the filter
+    silently drops its Probe.  If that scenario becomes load-
+    bearing the transport can switch from ``recvfrom`` to
+    ``recvmsg`` with ``IP_PKTINFO`` / ``IPV6_PKTINFO`` and skip
+    the on-link check when the destination address on the
+    incoming datagram is a unicast interface address rather than
+    the multicast group.
 
     **Known limitation — same-link attackers.**  An attacker already
     on our link can spoof a source IP inside our subnet and still

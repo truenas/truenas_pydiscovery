@@ -1,32 +1,20 @@
-"""Linux netlink address enumeration for a single interface.
+"""Linux netlink address enumeration.
 
-Dumps every IPv4 / IPv6 address the kernel has bound to a given
-ifindex by sending one ``RTM_GETADDR`` request with
+Dumps every IPv4 / IPv6 address the kernel has bound to an
+interface by sending one ``RTM_GETADDR`` request with
 ``NLM_F_REQUEST | NLM_F_DUMP`` and parsing the resulting
-``RTM_NEWADDR`` replies.
-
-Why netlink and not ``SIOCGIFADDR``: ``SIOCGIFADDR`` only returns
-the *primary* IPv4 address of an interface, so secondary addresses
-added via ``ip addr add`` are invisible — clients on the secondary
-subnet would then be silently rejected by on-link source filters
-and would receive service URLs pointing at the primary address.
-The three reference WSD daemons (``christgau/wsdd``,
-``wsdd-native``, ``c_wsd``) all enumerate every address; we do the
-same via netlink because the ``getifaddrs`` alternative requires
-``ctypes``, which is not permitted in this codebase.
+``RTM_NEWADDR`` replies.  Tentative, DAD-failed, and deprecated
+addresses are excluded — those aren't reachable for a client.
 
 References:
     - ``linux/netlink.h`` — ``nlmsghdr``, ``NLM_F_*``, ``NLMSG_*``.
     - ``linux/rtnetlink.h`` — ``RTM_*``.
     - ``linux/if_addr.h`` — ``ifaddrmsg`` and ``IFA_*``.
     - RFC 3549 (Linux Netlink as IP Services Protocol) §2.
-    - ``wsd_implementations/wsdd/src/wsdd.py:1498-1611`` — the
-      reference parse modelled on.
 """
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import struct
 from dataclasses import dataclass, field
@@ -92,15 +80,19 @@ _NETLINK_DUMP_TIMEOUT_S = 2.0
 # ``_drain_until_done`` handles by concatenating.
 _RECV_BUF_SIZE = 65536
 
-# Netlink address of the kernel peer (``pid = 0``, ``groups = 0``).
-# See ``netlink(7)`` — userspace sends unicast messages here to
-# query/update routing-family state.
-_KERNEL_ADDR = (0, 0)
-
-# Multicast-groups mask for ``bind``: 0 = no group subscriptions.  We
-# only want the one-shot dump, not live ``RTM_NEWADDR`` /
-# ``RTM_DELADDR`` notifications.
-_NO_MCAST_GROUPS = 0
+# Netlink address ``(portid=0, groups=0)`` — serves both uses on
+# this short-lived dump socket:
+#   * ``sendto``: portid 0 names the kernel as the destination peer.
+#   * ``bind``:   portid 0 asks the kernel to auto-assign our local
+#                 portid (``netlink(7)``: "If set to 0, kernel takes
+#                 care of assigning it when calling bind(2)").  A
+#                 specific portid would collide with any other
+#                 netlink socket in this process bound to the same
+#                 value (notably ``link_monitor.LinkMonitor``, which
+#                 subscribes to ``RTMGRP_LINK``).
+# Groups 0 means no multicast subscriptions — we only want the
+# one-shot dump, not live ``RTM_NEWADDR`` / ``RTM_DELADDR`` events.
+_ANY_ADDR = (0, 0)
 
 # Sequence number stamped on our single request.  Any integer works;
 # the kernel echoes it back on each reply so a caller can correlate
@@ -129,43 +121,49 @@ class InterfaceAddresses:
     v6: list[IPv6Interface] = field(default_factory=list)
 
 
-def enumerate_addresses(ifindex: int) -> InterfaceAddresses:
-    """Dump every IPv4/IPv6 address bound to *ifindex* via netlink.
+def enumerate_all_addresses() -> dict[int, InterfaceAddresses]:
+    """Dump every IPv4/IPv6 address on every interface via netlink.
 
     Opens a short-lived ``AF_NETLINK / NETLINK_ROUTE`` socket, sends
     one ``RTM_GETADDR`` with ``ifa_family = AF_UNSPEC`` (so both
     families come back in one round-trip), drains responses until
     ``NLMSG_DONE`` or ``NLMSG_ERROR``, and parses each
-    ``RTM_NEWADDR``.  Addresses whose ``ifa_index`` differs from
-    *ifindex* are discarded — the dump itself is system-wide.
+    ``RTM_NEWADDR``.  The returned dict is keyed by ``ifa_index``.
 
     Tentative / DAD-failed / deprecated addresses are excluded.
 
     Any netlink-level failure logs at ERROR and returns an empty
-    ``InterfaceAddresses``.
+    dict.
     """
-    result = InterfaceAddresses()
     try:
         sock = socket.socket(
             socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE,
         )
     except OSError as e:
         logger.error("netlink socket open failed: %s", e)
-        return result
+        return {}
     try:
         sock.settimeout(_NETLINK_DUMP_TIMEOUT_S)
-        sock.bind((os.getpid(), _NO_MCAST_GROUPS))
+        sock.bind(_ANY_ADDR)
         _send_getaddr(sock)
         buf = _drain_until_done(sock)
     except OSError as e:
-        logger.error(
-            "netlink dump failed for ifindex=%d: %s", ifindex, e,
-        )
+        logger.error("netlink dump failed: %s", e)
         sock.close()
-        return result
+        return {}
     sock.close()
-    parse_dump(buf, ifindex, result)
-    return result
+    return parse_dump_all(buf)
+
+
+def enumerate_addresses(ifindex: int) -> InterfaceAddresses:
+    """Dump every IPv4/IPv6 address bound to *ifindex*.
+
+    Convenience wrapper over ``enumerate_all_addresses`` — issues the
+    same system-wide dump and returns the entry for *ifindex*, or an
+    empty ``InterfaceAddresses`` if the interface has no reachable
+    addresses (or the dump failed).
+    """
+    return enumerate_all_addresses().get(ifindex, InterfaceAddresses())
 
 
 def _send_getaddr(sock: socket.socket) -> None:
@@ -178,7 +176,7 @@ def _send_getaddr(sock: socket.socket) -> None:
         _REQUEST_SEQ,
         0,               # nlmsg_pid: 0 ⇒ kernel fills in on reply
     )
-    sock.sendto(hdr + body, _KERNEL_ADDR)
+    sock.sendto(hdr + body, _ANY_ADDR)
 
 
 def _drain_until_done(sock: socket.socket) -> bytes:
@@ -210,10 +208,8 @@ def _terminates(buf: bytes) -> bool:
     return False
 
 
-def parse_dump(
-    buf: bytes, ifindex: int, out: InterfaceAddresses,
-) -> None:
-    """Parse a concatenated ``RTM_NEWADDR`` stream into *out*.
+def parse_dump_all(buf: bytes) -> dict[int, InterfaceAddresses]:
+    """Parse a concatenated ``RTM_NEWADDR`` stream keyed by ifindex.
 
     For IPv4 prefer ``IFA_LOCAL`` (the local side of a point-to-point
     link); otherwise fall back to ``IFA_ADDRESS``.  For IPv6,
@@ -225,16 +221,17 @@ def parse_dump(
     Exposed as a module-level function so tests can feed it synthetic
     netlink buffers without opening a real socket.
     """
+    result: dict[int, InterfaceAddresses] = {}
     offset = 0
     while offset + _NLMSGHDR.size <= len(buf):
         msg_len, msg_type, _, _, _ = _NLMSGHDR.unpack_from(buf, offset)
         if msg_len < _NLMSGHDR.size or offset + msg_len > len(buf):
-            return
+            return result
         body_start = offset + _NLMSGHDR.size
         body_end = offset + msg_len
 
         if msg_type == NLMSG_DONE:
-            return
+            return result
         if msg_type != RTM_NEWADDR:
             offset += _align(msg_len)
             continue
@@ -245,7 +242,7 @@ def parse_dump(
         fam, prefixlen, flags, _scope, idx = _IFADDRMSG.unpack_from(
             buf, body_start,
         )
-        if idx != ifindex or fam not in (socket.AF_INET, socket.AF_INET6):
+        if fam not in (socket.AF_INET, socket.AF_INET6):
             offset += _align(msg_len)
             continue
 
@@ -262,9 +259,28 @@ def parse_dump(
             continue
 
         if addr_bytes is not None:
-            _record(out, fam, addr_bytes, prefixlen)
+            bucket = result.setdefault(idx, InterfaceAddresses())
+            _record(bucket, fam, addr_bytes, prefixlen)
 
         offset += _align(msg_len)
+    return result
+
+
+def parse_dump(
+    buf: bytes, ifindex: int, out: InterfaceAddresses,
+) -> None:
+    """Parse *buf* and accumulate addresses for *ifindex* into *out*.
+
+    Thin wrapper around ``parse_dump_all`` kept for the per-interface
+    consumer (WSD) and for the existing test surface that feeds
+    ``parse_dump`` synthetic buffers.  Addresses for other ifindexes
+    are silently discarded.
+    """
+    matched = parse_dump_all(buf).get(ifindex)
+    if matched is None:
+        return
+    out.v4.extend(matched.v4)
+    out.v6.extend(matched.v6)
 
 
 def _scan_attrs(

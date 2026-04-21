@@ -15,7 +15,9 @@ from dataclasses import dataclass
 
 import defusedxml.ElementTree as SafeET  # type: ignore[import-untyped]
 
-from .constants import Attribute, Element, Prefix, URN_PREFIX, WellKnownURI
+from .constants import (
+    Attribute, Element, NS_MAP, Prefix, URN_PREFIX, WellKnownURI,
+)
 from .namespaces import qname
 
 
@@ -84,11 +86,49 @@ def build_envelope(
     if body_element is not None:
         body.append(body_element)
 
+    # WS-Discovery QName-valued element text (e.g.
+    # ``<wsd:Types>wsdp:Device pub:Computer</wsd:Types>``) only
+    # resolves when every prefix the text references is declared on
+    # an ancestor.  ``ElementTree`` binds a prefix automatically only
+    # when it appears as a tag or attribute *name*; prefixes that
+    # live solely in text content stay unbound, and Windows's WSD
+    # parser rejects such envelopes — the device never appears in
+    # Explorer's Network view.  Force the text-only prefixes onto
+    # the envelope root here, skipping any whose URI ET will already
+    # auto-declare from a tag in this tree (otherwise the same
+    # ``xmlns:X`` would be emitted twice and strict parsers like
+    # ``defusedxml``'s reject duplicate attributes).
+    _declare_text_only_namespaces(envelope)
+
     tree = ET.ElementTree(envelope)
     ET.indent(tree, space="")
     return ET.tostring(
         envelope, encoding="utf-8", xml_declaration=True,
     )
+
+
+def _declare_text_only_namespaces(envelope: ET.Element) -> None:
+    """Add ``xmlns:`` attributes on *envelope* for every prefix in
+    ``NS_MAP`` whose URI isn't already used as an element tag
+    namespace anywhere in the subtree.
+
+    ``ET`` auto-emits an ``xmlns:`` declaration for any URI that
+    appears as a tag namespace; the prefixes we add here are the
+    ones that appear **only** in QName text content (``wsdp:`` and
+    ``pub:`` in ``<wsd:Types>``).  Mirrors the role of
+    ``christgau/wsdd``'s forced-full-xmlns (``wsdd.py:506-507``)
+    without emitting duplicates.
+    """
+    used_in_tags: set[str] = set()
+    for elem in envelope.iter():
+        tag = elem.tag
+        if isinstance(tag, str) and tag.startswith("{"):
+            uri = tag[1:tag.index("}")]
+            used_in_tags.add(uri)
+    for prefix, uri in NS_MAP.items():
+        if uri in used_in_tags:
+            continue
+        envelope.set(f"xmlns:{prefix}", uri)
 
 
 def parse_envelope(data: bytes) -> SOAPEnvelope:

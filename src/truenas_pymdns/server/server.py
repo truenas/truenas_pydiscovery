@@ -348,7 +348,7 @@ class MDNSServer(BaseDaemon):
 
     def _on_conflict(self, records: list[MDNSRecord]) -> None:
         """RFC 6762 s9: on conflict, rename and re-probe."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task = loop.create_task(self._resolve_conflict(records))
         self._conflict_tasks.append(task)
         task.add_done_callback(
@@ -437,9 +437,17 @@ class MDNSServer(BaseDaemon):
         ``RecordProbeFailure`` increments the rate-limit counter.
         """
         # Collect (name_lower, rtype) pairs whose peer rdata differs
-        # from ours for at least one UNIQUE (cache-flush) record we
-        # own on this interface.  Shared records (e.g. service PTR)
-        # can coexist; different rdata is not a conflict for them.
+        # from *every* UNIQUE (cache-flush) record we own on this
+        # interface.  Shared records (e.g. service PTR) can coexist;
+        # different rdata is not a conflict for them.
+        #
+        # The peer's rdata is a conflict iff it isn't already in our
+        # RRSET.  A host with multiple IPv6 addresses on one
+        # interface owns several AAAA records for the same (name,
+        # type); ``IP_MULTICAST_LOOP=1`` echoes each back to us.  A
+        # naive loop that flags on the first mismatch would see
+        # echoed-AAAA-#2 as a conflict against our owned-AAAA-#1 and
+        # trip the probe loop even though #2 is in our own RRSET.
         #
         # RFC 6762 §16 requires case-insensitive rdata comparison for
         # name-bearing record types (PTR/SRV target) — ``data ==``
@@ -447,26 +455,24 @@ class MDNSServer(BaseDaemon):
         # appropriately.  A byte-exact ``rdata_wire()`` compare would
         # flag our own multicast-loopback echo as a conflict whenever
         # name compression re-encodes a target in a different case
-        # than our in-memory copy (e.g. ``MDNSRecordKey`` lowercases
-        # the A record's name field, so a compression pointer
-        # referencing it yields the lowercase form while our stored
-        # ``PTRRecordData.target`` preserves the original casing).
+        # than our in-memory copy.
         conflicts: set[tuple[str, QType]] = set()
         for rr in message.answers:
             owned = self._registry.lookup(
                 rr.key.name, rr.key.rtype, ifindex,
             )
-            for ow in owned:
-                if not ow.record.cache_flush:
-                    continue
-                if ow.record.data == rr.data:
-                    continue
-                conflicts.add((rr.key.name.lower(), rr.key.rtype))
-                break
+            unique_owned = [
+                ow for ow in owned if ow.record.cache_flush
+            ]
+            if not unique_owned:
+                continue
+            if any(ow.record.data == rr.data for ow in unique_owned):
+                continue
+            conflicts.add((rr.key.name.lower(), rr.key.rtype))
         if not conflicts:
             return
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for group in self._entry_groups:
             if group.state != EntryGroupState.ESTABLISHED:
                 continue

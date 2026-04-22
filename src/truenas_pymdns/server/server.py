@@ -591,6 +591,19 @@ class MDNSServer(BaseDaemon):
 
     # -- Reload ---------------------------------------------------------------
 
+    def apply_config(self, new_config: DaemonConfig) -> None:
+        """Swap in a freshly-parsed config and re-derive cached attrs.
+
+        Called by the composite parent before ``_reload()`` fans out,
+        so the reload picks up on-disk changes to hostname/domain/
+        interfaces/service-dir.  Without this, ``self._config`` stays
+        frozen at the value captured in ``__init__`` and SIGHUP is
+        only useful for files the daemon re-reads directly (the
+        services.d directory)."""
+        self._config = new_config
+        self._hostname = get_hostname(new_config.server)
+        self._fqdn = f"{self._hostname}.{new_config.server.domain_name}"
+
     async def _reload(self) -> None:
         """SIGHUP: re-resolve interfaces + addresses, reload services."""
         logger.info("Reloading configuration and services")

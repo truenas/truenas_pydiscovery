@@ -19,7 +19,7 @@ def run_daemon(
     name: str,
     description: str,
     config_loader: Callable[[Path], Any],
-    server_class: Callable[[Any], Any],
+    server_class: Callable[..., Any],
     default_config: Path,
     *,
     logger_name: str | None = None,
@@ -27,12 +27,15 @@ def run_daemon(
     """Parse CLI flags, set up logging, load config, and run *server_class*.
 
     *config_loader* is called with the config file path and must return
-    a config object accepted by ``server_class(config)``.
+    a config object accepted by ``server_class(config, reloader)``.
 
-    *server_class* is any callable that takes the loaded config and
+    *server_class* is any callable that takes ``(config, reloader)`` and
     returns a daemon exposing ``async run()`` — typically a
     ``BaseDaemon`` subclass, but can be a factory function for
-    composite daemons.
+    composite daemons.  ``reloader`` is a zero-argument callable that
+    re-invokes ``config_loader`` on the same path, so the server can
+    pick up on-disk config changes on SIGHUP without re-parsing CLI
+    args.  A server that doesn't support live reload may ignore it.
 
     *logger_name* is the top-level logger for this daemon's package
     (e.g. ``"truenas_pymdns"``).  If not given, *name* is used.
@@ -64,6 +67,11 @@ def run_daemon(
     else:
         setup_syslog(logger_name, ident=f"{name}: ")
 
-    config = config_loader(args.config)
-    server = server_class(config)
+    config_path: Path = args.config
+
+    def reloader() -> Any:
+        return config_loader(config_path)
+
+    config = reloader()
+    server = server_class(config, reloader)
     asyncio.run(server.run())

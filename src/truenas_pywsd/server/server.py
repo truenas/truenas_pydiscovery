@@ -117,6 +117,15 @@ class WSDServer(BaseDaemon):
         await loop.run_in_executor(None, self._write_status)
         logger.info("WSD daemon stopped")
 
+    def apply_config(self, new_config: DaemonConfig) -> None:
+        """Swap in a freshly-parsed config.
+
+        ``_reload()`` already re-derives ``_hostname`` and
+        ``_endpoint_uuid`` from ``self._config.server`` on every
+        SIGHUP, so replacing the config reference is sufficient — the
+        subsequent reload picks up the new values."""
+        self._config = new_config
+
     async def _reload(self) -> None:
         logger.info("Reloading WSD configuration")
 

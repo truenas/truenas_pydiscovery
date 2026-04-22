@@ -7,10 +7,10 @@ from truenas_pydiscovery_utils.entry_point import run_daemon
 
 
 class _InstantServer:
-    """Minimal server_class: records its config, exits immediately."""
+    """Minimal server_class: records its args, exits immediately."""
 
-    def __init__(self, config) -> None:
-        _InstantServer.seen.append(config)
+    def __init__(self, config, reloader) -> None:
+        _InstantServer.seen.append((config, reloader))
 
     async def run(self) -> None:
         return None
@@ -27,7 +27,7 @@ class TestRunDaemon:
 
         def capture_loader(path: Path) -> str:
             captured_paths.append(path)
-            return "fake-config"
+            return f"cfg@{path}#{len(captured_paths)}"
 
         monkeypatch.setattr(
             "sys.argv",
@@ -39,7 +39,12 @@ class TestRunDaemon:
         )
 
         assert captured_paths == [Path("/tmp/test.conf")]
-        assert _InstantServer.seen == ["fake-config"]
+        assert len(_InstantServer.seen) == 1
+        config, reloader = _InstantServer.seen[0]
+        assert config == "cfg@/tmp/test.conf#1"
+        # Reloader is bound to the same path and re-invokes the loader.
+        assert reloader() == "cfg@/tmp/test.conf#2"
+        assert captured_paths == [Path("/tmp/test.conf")] * 2
 
     def test_uses_default_config(self, monkeypatch):
         _InstantServer.seen = []
@@ -57,4 +62,7 @@ class TestRunDaemon:
         )
 
         assert captured_paths == [default]
-        assert _InstantServer.seen == ["cfg"]
+        assert len(_InstantServer.seen) == 1
+        config, reloader = _InstantServer.seen[0]
+        assert config == "cfg"
+        assert callable(reloader)

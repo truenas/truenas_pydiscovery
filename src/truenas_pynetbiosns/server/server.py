@@ -150,6 +150,15 @@ class NBNSServer(BaseDaemon):
         await loop.run_in_executor(None, self._write_status)
         logger.info("NetBIOS NS daemon stopped")
 
+    def apply_config(self, new_config: DaemonConfig) -> None:
+        """Swap in a freshly-parsed config.
+
+        ``_reload()`` already re-derives ``_netbios_name`` and
+        ``_workgroup`` from ``self._config.server`` on every SIGHUP,
+        so simply replacing the config reference is sufficient — the
+        subsequent reload will pick up the new values."""
+        self._config = new_config
+
     async def _reload(self) -> None:
         """SIGHUP: release names, re-resolve subnets, re-register."""
         logger.info("Reloading configuration")

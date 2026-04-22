@@ -57,8 +57,8 @@ A Windows client searches for devices on the network:
        |  RelatesTo: {probe msg id}                      |
        |  EndpointReference: urn:uuid:{uuid}             |
        |  Types: wsdp:Device pub:Computer                |
-       |  MetadataVersion: 1                             |
-       |  (no XAddrs — client must Resolve)              |
+       |  XAddrs: http://...:5357/{uuid}                 |
+       |  MetadataVersion: N                             |
        |<---------------------|                          |
 ```
 

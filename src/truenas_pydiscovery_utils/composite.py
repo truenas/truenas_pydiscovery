@@ -67,6 +67,12 @@ class CompositeDaemon(BaseDaemon):
         self._children: list[tuple[str, BaseDaemon]] = list(children)
         self._config_reloader = config_reloader
         self._config_dispatch = config_dispatch
+        # True while a reload is in flight.  SIGHUPs arriving during
+        # that window are dropped with a log line — the simpler
+        # alternative to queueing, which would require carrying
+        # pending-config state across iterations.  Operators who
+        # edit config during a reload re-send SIGHUP.
+        self._reload_running = False
 
     async def _start(
         self, loop: asyncio.AbstractEventLoop,
@@ -100,18 +106,40 @@ class CompositeDaemon(BaseDaemon):
 
     async def _reload(self) -> None:
         """Re-read config (if a reloader is wired up) and fan SIGHUP
-        out to every child."""
-        if self._config_reloader is not None:
-            await self._refresh_child_configs()
-        results = await asyncio.gather(
-            *(child._reload() for _, child in self._children),
-            return_exceptions=True,
-        )
-        for (name, _), res in zip(self._children, results):
-            if isinstance(res, BaseException):
-                self._logger.error(
-                    "Child %s failed to reload: %s", name, res,
-                )
+        out to every child.
+
+        A SIGHUP that arrives while another reload is in flight is
+        logged and dropped — queueing would require carrying
+        pending-config state across iterations to avoid the
+        ``apply_config`` interleaving race (SIGHUP N+1's apply
+        overwriting the ``_prev_config`` that SIGHUP N's
+        ``child._reload`` is about to diff), and concurrent reloads
+        would race on each child's ``_interfaces`` / ``_registry``
+        state.  Dropping is simpler and has a clear operator-
+        facing contract: if you edit config during a reload, send
+        another SIGHUP when the current one finishes."""
+        if self._reload_running:
+            self._logger.info(
+                "SIGHUP arrived during in-flight reload — dropped; "
+                "resend once the current reload completes",
+            )
+            return
+
+        self._reload_running = True
+        try:
+            if self._config_reloader is not None:
+                await self._refresh_child_configs()
+            results = await asyncio.gather(
+                *(child._reload() for _, child in self._children),
+                return_exceptions=True,
+            )
+            for (name, _), res in zip(self._children, results):
+                if isinstance(res, BaseException):
+                    self._logger.error(
+                        "Child %s failed to reload: %s", name, res,
+                    )
+        finally:
+            self._reload_running = False
 
     async def _refresh_child_configs(self) -> None:
         """Invoke the config reloader + dispatcher before fan-out.

@@ -228,6 +228,27 @@ class BrowseAnnouncer:
             self._task.cancel()
             self._task = None
 
+    def set_hostname(self, hostname: str) -> None:
+        """Update the advertised hostname for future announcements.
+
+        The next ``_send_announcement`` iteration picks up the new
+        value; the ongoing sleep backoff is not disturbed.  Used by
+        the SIGHUP live-update path so a NetBIOS name change doesn't
+        need the whole announcer cancelled + recreated."""
+        self._hostname = hostname
+
+    def set_workgroup(self, workgroup: str) -> None:
+        """Update the advertised workgroup for future announcements.
+
+        See ``set_hostname`` — same cadence preservation semantics."""
+        self._workgroup = workgroup
+
+    def set_server_string(self, server_string: str) -> None:
+        """Update the advertised server comment for future announcements.
+
+        See ``set_hostname`` — same cadence preservation semantics."""
+        self._server_string = server_string
+
     async def _loop(self) -> None:
         """Startup burst then exponential backoff (MS-BRWS s3.2.6)."""
         server_type = ServerType.WORKSTATION | ServerType.SERVER

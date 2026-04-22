@@ -46,6 +46,45 @@ implement) live in the per-package READMEs:
 | [WSDAPI: WS-Discovery Compliance](https://learn.microsoft.com/en-us/windows/win32/wsdapi/ws-discovery-specification-compliance) | Microsoft WSDAPI: per-clause MUST/SHOULD/MAY profile for WS-Discovery 1.1 | Microsoft | — |
 | [WSDAPI: DPWS Compliance](https://learn.microsoft.com/en-us/windows/win32/wsdapi/dpws-specification-compliance) | Microsoft WSDAPI: per-clause MUST/SHOULD/MAY profile for DPWS 1.1 | Microsoft | — |
 
+### Known spec-vs-reality divergence: `pub:Computer` separator
+
+[MS-PBSD] §2.2 "Computer Information" in the 2024-04-23 PDF (pp. 7-8)
+gives the `pub:Computer` text format as:
+
+> - If the computer is domain joined: `<NetBIOS_Computer_Name>/Domain:<NetBIOS_Domain_Name>`
+> - If the computer is in a workgroup: `<NetBIOS_Computer_Name>\Workgroup:<Workgroup_Name>`
+> - Otherwise: `<NetBIOS_Computer_Name>\NotJoined`
+
+Note the asymmetry: `Domain` uses `/`, `Workgroup` and `NotJoined`
+use `\`.
+
+**Real Windows emits `/` for both.** Captured from two independent
+Windows 11 hosts doing peer discovery against each other:
+
+```
+<pub:Computer>ALEXPRECISION/Workgroup:WORKGROUP</pub:Computer>
+<pub:Computer>WALKSURF/Workgroup:WORKGROUP</pub:Computer>
+```
+
+`wsdd` (`source3/script/wsdd.py:1059`) and `wsdd-native`
+(`src/wsd_server.cpp:612`) — the two Windows-interoperable reference
+implementations — also emit `/Workgroup:`. Our
+`build_get_response` in `src/truenas_pywsd/protocol/messages.py`
+does too. Treat the MS-PBSD `\` as a spec typo; follow the
+Windows wire.
+
+**Reproduction:** capture on a Windows host while a second Windows
+host runs network discovery (`explorer.exe → Network`):
+
+```
+tcpdump -i <iface> -nn -w wsd.pcapng '(udp port 3702) or (tcp port 5357)'
+```
+
+The metadata GetResponse on TCP 5357 carries the `<pub:Computer>`
+element; see the capture analysed in
+`tests/wsd/test_protocol_messages.py::TestGetResponse` for the
+exact shape.
+
 ---
 
 ## Related / Non-Normative References

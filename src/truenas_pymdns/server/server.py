@@ -8,7 +8,7 @@ import time
 from truenas_pydiscovery_utils.daemon import BaseDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
 
-from .config import DaemonConfig, get_hostname
+from .config import DaemonConfig, ServiceConfig, get_hostname
 from .core.announcer import Announcer
 from .core.conflict import generate_alternative_name
 from .core.entry_group import EntryGroup
@@ -35,6 +35,7 @@ from .net.link_monitor import LinkMonitor
 from .net.transport import MDNSTransport
 from .query.responder import Responder
 from .service.file_loader import (
+    ServiceKey,
     load_service_directory,
     service_to_entry_group,
 )
@@ -73,11 +74,24 @@ class MDNSServer(BaseDaemon):
     def __init__(self, config: DaemonConfig) -> None:
         super().__init__(logger)
         self._config = config
+        # Set by ``apply_config`` on SIGHUP so ``_reload`` can diff
+        # the outgoing config against the new one and pick a minimally
+        # disruptive reconciliation path.  ``None`` until the first
+        # SIGHUP, which forces a full rebuild.
+        self._prev_config: DaemonConfig | None = None
         self._hostname = get_hostname(config.server)
         self._fqdn = f"{self._hostname}.{config.server.domain_name}"
         self._interfaces: dict[int, PerInterfaceState] = {}
         self._registry = ServiceRegistry()
         self._entry_groups: list[EntryGroup] = []
+        # Index from service identity to its registered ``EntryGroup``.
+        # Populated by ``_load_static_services`` and drained by the
+        # delta-reload path so services.d edits can add or remove
+        # individual services without goodbyeing the whole registry.
+        # Kept in lock-step with the subset of ``_entry_groups`` that
+        # came from services.d; the host-addresses group lives only
+        # in ``_entry_groups``.
+        self._service_groups: dict[ServiceKey, EntryGroup] = {}
         self._status = StatusWriter(config.rundir, logger)
         self._wake = asyncio.Event()
         # Tracks in-flight conflict-resolution tasks spawned by
@@ -265,6 +279,17 @@ class MDNSServer(BaseDaemon):
             None, load_service_directory, self._config.service_dir,
         )
         for svc in services:
+            key = ServiceKey.from_config(svc, self._hostname, self._fqdn)
+            if key in self._service_groups:
+                # Two .conf files defining the same service would
+                # otherwise register the same records twice; the
+                # second copy contributes nothing to the wire and
+                # breaks the delta reload's service-key index.
+                logger.warning(
+                    "Duplicate service %s.%s on port %d — skipping",
+                    key.instance_name, key.service_type, key.port,
+                )
+                continue
             iface_indexes = None
             if svc.interfaces:
                 iface_indexes = []
@@ -279,6 +304,7 @@ class MDNSServer(BaseDaemon):
                 svc, self._hostname, self._fqdn, iface_indexes,
             )
             self._entry_groups.append(group)
+            self._service_groups[key] = group
 
     def _register_host_addresses(self) -> None:
         """Create A/AAAA records from discovered interface addresses.
@@ -599,14 +625,61 @@ class MDNSServer(BaseDaemon):
         interfaces/service-dir.  Without this, ``self._config`` stays
         frozen at the value captured in ``__init__`` and SIGHUP is
         only useful for files the daemon re-reads directly (the
-        services.d directory)."""
+        services.d directory).
+
+        Stashes the outgoing config as ``_prev_config`` so the
+        subsequent ``_reload`` can diff old vs new and pick a
+        minimally disruptive reconciliation path."""
+        self._prev_config = self._config
         self._config = new_config
         self._hostname = get_hostname(new_config.server)
         self._fqdn = f"{self._hostname}.{new_config.server.domain_name}"
 
     async def _reload(self) -> None:
-        """SIGHUP: re-resolve interfaces + addresses, reload services."""
-        logger.info("Reloading configuration and services")
+        """SIGHUP: reconcile live state with the new config, minimally.
+
+        Picks one of three paths based on what actually changed since
+        the previous ``apply_config``:
+
+        * **full rebuild** — interfaces or IPv4/IPv6 toggle changed,
+          or this is the first SIGHUP (``_prev_config is None``).
+          Transports rebuild, every record goodbyes.
+        * **host rename** — hostname or domain changed.  Every record
+          goodbyes + re-probes under the new name but transports and
+          per-interface tasks stay up.
+        * **service delta** — only ``services.d`` on disk may have
+          changed.  Removed services get a targeted goodbye, added
+          services probe + announce individually; host A/AAAA
+          records and untouched services keep running."""
+        prev = self._prev_config
+        cur = self._config
+
+        if (
+            prev is None
+            or prev.server.interfaces != cur.server.interfaces
+            or prev.server.use_ipv4 != cur.server.use_ipv4
+            or prev.server.use_ipv6 != cur.server.use_ipv6
+        ):
+            await self._full_rebuild_reload()
+            return
+
+        if (
+            prev.server.host_name != cur.server.host_name
+            or prev.server.domain_name != cur.server.domain_name
+        ):
+            await self._host_rename_reload()
+            return
+
+        await self._service_delta_reload()
+
+    async def _full_rebuild_reload(self) -> None:
+        """Tear down transports + registry and re-build from scratch.
+
+        The only path that closes and re-opens sockets.  Fires on
+        ``interfaces`` / ``use_ipv4`` / ``use_ipv6`` changes (which
+        require rebinding) and on first SIGHUP (no ``_prev_config``
+        to diff against, so we don't know what changed)."""
+        logger.info("Reload: full rebuild")
 
         for task in self._conflict_tasks:
             task.cancel()
@@ -636,6 +709,7 @@ class MDNSServer(BaseDaemon):
         for group in self._entry_groups:
             self._registry.remove_group(group)
         self._entry_groups.clear()
+        self._service_groups.clear()
 
         loop = asyncio.get_running_loop()
         await self._setup_interfaces(loop)
@@ -648,9 +722,175 @@ class MDNSServer(BaseDaemon):
         self._wake.set()
 
         logger.info(
-            "Reload complete: %d services on %d interfaces",
+            "Full rebuild complete: %d services on %d interfaces",
             len(self._entry_groups), len(self._interfaces),
         )
+
+    async def _host_rename_reload(self) -> None:
+        """Hostname or domain changed: goodbye + re-probe everything.
+
+        Every owned record references the host FQDN somehow — A/AAAA
+        keys, SRV targets, and (for ``instance_name = %h``) service
+        PTR targets — so every record needs a fresh advertisement
+        under the new name.  Transports and per-interface tasks stay
+        up because interfaces didn't change; responder/prober/
+        announcer resume against the new records as soon as they're
+        re-registered."""
+        logger.info("Reload: host rename -> %s", self._fqdn)
+
+        for task in self._conflict_tasks:
+            task.cancel()
+        self._conflict_tasks.clear()
+
+        for ifstate in self._interfaces.values():
+            owned = self._registry.get_all_records(ifstate.iface.index)
+            if owned:
+                send_goodbye(
+                    ifstate.transport.send_message,
+                    [ow.record for ow in owned],
+                )
+
+        for group in self._entry_groups:
+            self._registry.remove_group(group)
+        self._entry_groups.clear()
+        self._service_groups.clear()
+
+        await self._load_static_services()
+        self._register_host_addresses()
+
+        for group in self._entry_groups:
+            await self._probe_and_announce(group)
+
+        self._wake.set()
+
+        logger.info(
+            "Host rename complete: %d services under %s",
+            len(self._service_groups), self._fqdn,
+        )
+
+    def _record_still_asserted(self, record: MDNSRecord) -> bool:
+        """True if some other registered group owns an identical record.
+
+        Two services of the same DNS-SD type share the meta-PTR
+        ``_services._dns-sd._udp.<domain>`` → ``<type>.<domain>``
+        (RFC 6763 §9) with byte-identical (name, rdata).  When only
+        one such service is being withdrawn, its meta-PTR is still
+        asserted by every kept service — RFC 6762 §10.1 goodbye is
+        only appropriate for records actually being withdrawn, so
+        this check lets the service-delta path filter those shared
+        records out of its goodbye set.
+
+        Must be called after the removed group has been dropped
+        from ``_entry_groups`` so the walk only sees records that
+        remain authoritative."""
+        for group in self._entry_groups:
+            for ow in group.owned_records:
+                if (
+                    ow.record.key == record.key
+                    and ow.record.data == record.data
+                ):
+                    return True
+        return False
+
+    async def _service_delta_reload(self) -> None:
+        """Services-only reload: add/remove individual service groups.
+
+        Runs when the config sections are byte-identical to the
+        previous SIGHUP — the only thing that could have changed is
+        ``services.d`` on disk (SMB share added/removed via
+        middleware, for example).  Diffs the set of currently-
+        registered service groups against the newly-loaded directory
+        and emits per-service actions: removed services get a
+        targeted goodbye + registry drop, added services probe +
+        announce individually.  Host A/AAAA records, untouched
+        services, responders, probers, and announcers all keep
+        running untouched."""
+        loop = asyncio.get_running_loop()
+        services = await loop.run_in_executor(
+            None, load_service_directory, self._config.service_dir,
+        )
+
+        new_key_to_svc: dict[ServiceKey, ServiceConfig] = {}
+        for svc in services:
+            key = ServiceKey.from_config(svc, self._hostname, self._fqdn)
+            if key in new_key_to_svc:
+                logger.warning(
+                    "Duplicate service %s.%s on port %d in services.d "
+                    "— skipping duplicate",
+                    key.instance_name, key.service_type, key.port,
+                )
+                continue
+            new_key_to_svc[key] = svc
+
+        old_keys = set(self._service_groups.keys())
+        new_keys = set(new_key_to_svc.keys())
+        to_remove = old_keys - new_keys
+        to_add = new_keys - old_keys
+
+        if not to_remove and not to_add:
+            logger.info("Reload: service delta (no changes)")
+            return
+
+        logger.info(
+            "Reload: service delta (-%d +%d)",
+            len(to_remove), len(to_add),
+        )
+
+        for key in to_remove:
+            group = self._service_groups.pop(key)
+            if group in self._entry_groups:
+                self._entry_groups.remove(group)
+            # RFC 6762 §10.1 goodbye is a TTL=0 assertion that a
+            # record is being withdrawn.  The DNS-SD meta-PTR
+            # ``_services._dns-sd._udp.<domain>`` → ``<type>.<domain>``
+            # (RFC 6763 §9) has byte-identical (name, rdata) across
+            # every service of a given type, so when another kept
+            # service still asserts it, the record is NOT being
+            # withdrawn — goodbye would falsely flush peers' "type
+            # exists" cache entry.  Filter such records out of the
+            # goodbye set; all instance-specific records (service
+            # PTR, SRV, TXT, subtype PTR) carry unique rdata and
+            # pass the filter.
+            to_goodbye = [
+                r for r in group.records
+                if not self._record_still_asserted(r)
+            ]
+            if to_goodbye:
+                # Send goodbye only on interfaces the group is
+                # published on; matches the scoping in
+                # _resolve_conflict so peers on other interfaces
+                # aren't spammed with records they never cached.
+                for ifstate in self._interfaces.values():
+                    if (
+                        group.interfaces is not None
+                        and ifstate.iface.index not in group.interfaces
+                    ):
+                        continue
+                    send_goodbye(
+                        ifstate.transport.send_message, to_goodbye,
+                    )
+            self._registry.remove_group(group)
+
+        for key in to_add:
+            svc = new_key_to_svc[key]
+            iface_indexes = None
+            if svc.interfaces:
+                iface_indexes = []
+                for name in svc.interfaces:
+                    iface = await loop.run_in_executor(
+                        None, resolve_interface, name,
+                    )
+                    if iface is not None:
+                        iface_indexes.append(iface.index)
+
+            group = service_to_entry_group(
+                svc, self._hostname, self._fqdn, iface_indexes,
+            )
+            self._entry_groups.append(group)
+            self._service_groups[key] = group
+            await self._probe_and_announce(group)
+
+        self._wake.set()
 
     # -- Status ---------------------------------------------------------------
 

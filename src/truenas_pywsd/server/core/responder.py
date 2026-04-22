@@ -99,6 +99,7 @@ class WSDResponder:
         addrs_v4: list[IPv4Interface],
         addrs_v6: list[IPv6Interface],
         scopes: list[str] | None = None,
+        metadata_version: Callable[[], int] = lambda: 1,
     ) -> None:
         self._send_unicast = send_unicast_fn
         self._endpoint_uuid = endpoint_uuid
@@ -111,6 +112,12 @@ class WSDResponder:
         # hosts that want scope filtering must configure scopes
         # explicitly.
         self._scopes: list[str] = list(scopes or [])
+        # Callable so SIGHUP-driven metadata changes on the server
+        # propagate to future ProbeMatch/ResolveMatch responses
+        # without needing to rebuild the responder.  WSD 1.1 §4.1
+        # requires the version to increment monotonically whenever
+        # metadata changes so clients know to re-fetch.
+        self._get_metadata_version = metadata_version
         self._tasks: list[asyncio.Task] = []
 
     def _is_on_link(self, source: tuple) -> bool:
@@ -201,8 +208,17 @@ class WSDResponder:
     async def _respond_probe(
         self, relates_to: str, source: tuple,
     ) -> None:
-        """Send ProbeMatch with random delay (WS-Discovery 1.1 s5.3)."""
-        data = build_probe_match(self._endpoint_uuid, relates_to)
+        """Send ProbeMatch with random delay (WS-Discovery 1.1 s5.3).
+
+        Includes ``<wsd:XAddrs>`` so peers skip the usual follow-up
+        multicast Resolve — matches Windows WSDAPI behaviour (the
+        Samba ``wsdd.py`` convention of omitting XAddrs was based
+        on an incorrect assumption about Windows's privacy stance)."""
+        data = build_probe_match(
+            self._endpoint_uuid, relates_to,
+            xaddrs=self._xaddrs,
+            metadata_version=self._get_metadata_version(),
+        )
         await self._send_with_jitter(data, source, "ProbeMatch")
 
     async def _respond_resolve(
@@ -211,6 +227,7 @@ class WSDResponder:
         """Send ResolveMatch with random delay (WS-Discovery 1.1 s6.3)."""
         data = build_resolve_match(
             self._endpoint_uuid, self._xaddrs, relates_to,
+            metadata_version=self._get_metadata_version(),
         )
         await self._send_with_jitter(data, source, "ResolveMatch")
 

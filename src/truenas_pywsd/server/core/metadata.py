@@ -29,6 +29,17 @@ class MetadataHandler:
         self._workgroup_or_domain = workgroup_or_domain
         self._is_domain = is_domain
 
+    def update_workgroup(
+        self, workgroup_or_domain: str, is_domain: bool,
+    ) -> None:
+        """Swap workgroup/domain for subsequent Get responses.
+
+        Used by the WSD SIGHUP live-update path so a middleware
+        workgroup edit doesn't need a Bye+Hello storm — clients that
+        re-Probe or re-Get after this call see the new value."""
+        self._workgroup_or_domain = workgroup_or_domain
+        self._is_domain = is_domain
+
     def handle_request(self, body: bytes) -> bytes:
         """Process an HTTP SOAP request and return response bytes.
 

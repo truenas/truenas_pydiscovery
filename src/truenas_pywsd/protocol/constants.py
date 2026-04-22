@@ -136,6 +136,11 @@ class Action(StrEnum):
     GET_RESPONSE = (
         "http://schemas.xmlsoap.org/ws/2004/09/transfer/GetResponse"
     )
+    # WS-Addressing 1.0 §6.5 fault action — peers emit this when
+    # rejecting a request (e.g. WSDAPI returns
+    # ``wsa:DestinationUnreachable`` with this action if
+    # ``<wsa:To>`` doesn't match any registered endpoint).
+    FAULT = f"{Namespace.WSA}/fault"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +222,14 @@ class Element(StrEnum):
     DEVICE_CATEGORY = "DeviceCategory"
     # PUB
     COMPUTER = "Computer"
+    # SOAP Fault (both SOAP 1.1 and 1.2 share these local names
+    # for Code/Subcode Value and Reason Text)
+    FAULT = "Fault"
+    CODE = "Code"
+    SUBCODE = "Subcode"
+    VALUE = "Value"
+    REASON = "Reason"
+    TEXT = "Text"
 
 
 class Attribute(StrEnum):

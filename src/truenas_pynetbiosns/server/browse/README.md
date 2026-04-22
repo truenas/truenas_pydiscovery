@@ -10,7 +10,11 @@ Host-announcement cadence and browser-election payloads on port
     and double to a 12-minute cap, matching nmbd behaviour.
     Payload includes server-type flags, OS version, and
     server-description string.  Wired up per subnet in
-    `server.server._setup_subnet`.
+    `server.server._setup_subnet`.  `set_hostname`,
+    `set_workgroup`, and `set_server_string` update the cached
+    fields in place so the SIGHUP live-update reload can change
+    announcement payloads without cancelling the announce loop —
+    the next iteration picks up the new values.
   - MS-BRWS payload builders used by callers that want to
     construct these frames without running the periodic loop:
     - `build_host_announcement(...)` — §2.2.1 HostAnnouncement

@@ -47,6 +47,8 @@ def build_envelope(
     message_id: str = "",
     app_sequence: int | None = None,
     message_number: int = 1,
+    reply_to: str = "",
+    from_address: str = "",
 ) -> bytes:
     """Build a SOAP 1.2 envelope with WS-Addressing headers.
 
@@ -54,6 +56,14 @@ def build_envelope(
 
     *app_sequence* is the InstanceId (fixed per daemon lifetime).
     *message_number* increments globally across all sent messages.
+
+    *reply_to* and *from_address* emit the matching
+    ``<wsa:ReplyTo>`` / ``<wsa:From>`` EPRs; both are optional per
+    WS-Addressing 1.0 §3.1 (ReplyTo defaults to anonymous, From
+    defaults to absent) but Windows WSDAPI rejects request-response
+    messages that omit ReplyTo with ``wsa:EndpointUnavailable`` in
+    practice.  Passing the anonymous URI for ReplyTo on HTTP Get
+    requests is the minimum for Windows interop.
 
     Returns UTF-8 encoded XML bytes.
     """
@@ -71,6 +81,22 @@ def build_envelope(
         ET.SubElement(
             header, qname(Prefix.WSA, Element.RELATES_TO),
         ).text = relates_to
+
+    if reply_to:
+        reply_epr = ET.SubElement(
+            header, qname(Prefix.WSA, Element.REPLY_TO),
+        )
+        ET.SubElement(
+            reply_epr, qname(Prefix.WSA, Element.ADDRESS),
+        ).text = reply_to
+
+    if from_address:
+        from_epr = ET.SubElement(
+            header, qname(Prefix.WSA, Element.FROM),
+        )
+        ET.SubElement(
+            from_epr, qname(Prefix.WSA, Element.ADDRESS),
+        ).text = from_address
 
     if app_sequence is not None:
         ET.SubElement(

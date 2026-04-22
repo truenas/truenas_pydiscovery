@@ -32,10 +32,16 @@ async def send_hello(
     xaddrs: str,
     app_sequence: int = 0,
     message_number: int = 1,
+    metadata_version: int = 1,
 ) -> None:
-    """Send Hello announcement with retransmission."""
+    """Send Hello announcement with retransmission.
+
+    *metadata_version* goes into the ``<wsd:MetadataVersion>`` element;
+    WSD 1.1 §4.1 requires clients to re-acquire metadata when the
+    value they see is greater than what they have cached."""
     data = build_hello(
         endpoint_uuid, xaddrs,
+        metadata_version=metadata_version,
         app_sequence=app_sequence, message_number=message_number,
     )
     await _retransmit_multicast(send_fn, data, "Hello")

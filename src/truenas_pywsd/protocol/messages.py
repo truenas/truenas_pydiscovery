@@ -96,18 +96,34 @@ def build_bye(
 def build_probe_match(
     endpoint_uuid: str,
     relates_to: str,
+    xaddrs: str = "",
     metadata_version: int = 1,
 ) -> bytes:
-    """Build a ProbeMatches response (WS-Discovery 1.1 s5.3)."""
+    """Build a ProbeMatches response (WS-Discovery 1.1 s5.3).
+
+    Sent unicast to the Probe originator.  ``<wsa:To>`` is the
+    anonymous URI — WS-Addressing 1.0 §3.1 says a reply uses the
+    request's ``ReplyTo`` (or anonymous if omitted), and the
+    multicast-group URN (``WSA_DISCOVERY``) is only appropriate
+    for messages actually addressed to the group.
+
+    *xaddrs* is the transport URL set; when non-empty, emitted as
+    ``<wsd:XAddrs>``.  WS-Discovery §5.3 permits XAddrs in a
+    ProbeMatch as a SHOULD, and Windows WSDAPI includes it so peers
+    can POST the metadata Get without a follow-up multicast
+    Resolve — one round-trip per discovery instead of two."""
     matches = ET.Element(qname(Prefix.WSD, Element.PROBE_MATCHES))
     match = ET.SubElement(matches, qname(Prefix.WSD, Element.PROBE_MATCH))
     _append_endpoint_reference(match, endpoint_uuid)
     ET.SubElement(match, qname(Prefix.WSD, Element.TYPES)).text = WSD_DEVICE_TYPES
+    if xaddrs:
+        ET.SubElement(match, qname(Prefix.WSD, Element.XADDRS)).text = xaddrs
     ET.SubElement(match, qname(Prefix.WSD, Element.METADATA_VERSION)).text = (
         str(metadata_version)
     )
     return build_envelope(
         Action.PROBE_MATCHES, matches, relates_to=relates_to,
+        to=WellKnownURI.WSA_ANONYMOUS,
     )
 
 
@@ -117,7 +133,10 @@ def build_resolve_match(
     relates_to: str,
     metadata_version: int = 1,
 ) -> bytes:
-    """Build a ResolveMatches response (WS-Discovery 1.1 s6.3)."""
+    """Build a ResolveMatches response (WS-Discovery 1.1 s6.3).
+
+    Sent unicast to the Resolve originator; ``<wsa:To>`` uses the
+    anonymous URI for the same reason as ``build_probe_match``."""
     matches = ET.Element(qname(Prefix.WSD, Element.RESOLVE_MATCHES))
     match = ET.SubElement(matches, qname(Prefix.WSD, Element.RESOLVE_MATCH))
     _append_endpoint_reference(match, endpoint_uuid)
@@ -128,6 +147,7 @@ def build_resolve_match(
     )
     return build_envelope(
         Action.RESOLVE_MATCHES, matches, relates_to=relates_to,
+        to=WellKnownURI.WSA_ANONYMOUS,
     )
 
 
@@ -317,7 +337,11 @@ def build_get_response(
         host, qname_ns(Namespace.PUB, Element.COMPUTER),
     ).text = f"{hostname}/{label}:{workgroup_or_domain}"
 
+    # HTTP unicast response to the Get request; WS-Addressing 1.0
+    # §3.1 specifies anonymous (or echo ReplyTo) for the reply's
+    # <wsa:To>, not the multicast-group URN.  Confirmed against
+    # Windows WSDAPI wire — its ProbeMatches also uses anonymous.
     return build_envelope(
         Action.GET_RESPONSE, metadata, relates_to=relates_to,
-        to=WellKnownURI.WSA_DISCOVERY,
+        to=WellKnownURI.WSA_ANONYMOUS,
     )

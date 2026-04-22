@@ -25,6 +25,9 @@ Default: 4.0.
 .BR \-r ", " \-\-resolve
 Fetch metadata (FriendlyName, Computer, Manufacturer) for each
 discovered device via HTTP.
+When a ProbeMatch omits XAddrs \(em Windows hosts do this by
+default for privacy \(em a unicast WS\-Discovery Resolve is sent to
+extract the transport URL before the HTTP Get.
 .TP
 .BI \-i " ADDR" "\fR,\fP \-\-interface " ADDR
 Interface IPv4 address to send from.

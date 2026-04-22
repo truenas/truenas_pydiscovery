@@ -66,10 +66,33 @@ class TestProbeMatch:
         assert env.relates_to == "urn:uuid:probe-123"
         assert b"wsdp:Device" in data
 
-    def test_probe_match_no_xaddrs(self):
-        """ProbeMatch should not include XAddrs (client must Resolve)."""
+    def test_probe_match_omits_xaddrs_when_not_provided(self):
+        # XAddrs is optional per WS-Discovery §5.3; callers that
+        # don't have a transport URL (e.g. unit tests) get a
+        # ProbeMatch without the element.
         data = build_probe_match(TEST_UUID, relates_to="urn:uuid:x")
-        assert b"XAddrs" not in data
+        assert b"<wsd:XAddrs>" not in data
+
+    def test_probe_match_includes_xaddrs_when_provided(self):
+        # Windows WSDAPI ships XAddrs inline in its ProbeMatch so
+        # peers can POST metadata Get without a follow-up Resolve.
+        # Our responder now passes self._xaddrs through;
+        # build_probe_match emits <wsd:XAddrs> when non-empty.
+        data = build_probe_match(
+            TEST_UUID, relates_to="urn:uuid:x",
+            xaddrs=TEST_XADDRS,
+        )
+        assert b"<wsd:XAddrs>" in data
+        assert TEST_XADDRS.encode() in data
+
+    def test_probe_match_wsa_to_is_anonymous(self):
+        # WS-Addressing 1.0 §3.1: response's <wsa:To> is the
+        # request's ReplyTo (anonymous by default), NOT the
+        # multicast-group URN.  Observed on Windows WSDAPI wire.
+        from truenas_pywsd.protocol.constants import WellKnownURI
+        data = build_probe_match(TEST_UUID, relates_to="urn:uuid:x")
+        env = parse_envelope(data)
+        assert env.to == WellKnownURI.WSA_ANONYMOUS
 
 
 class TestResolveMatch:
@@ -81,6 +104,14 @@ class TestResolveMatch:
         assert env.action == Action.RESOLVE_MATCHES
         assert env.relates_to == "urn:uuid:resolve-456"
         assert TEST_XADDRS.encode() in data
+
+    def test_resolve_match_wsa_to_is_anonymous(self):
+        from truenas_pywsd.protocol.constants import WellKnownURI
+        data = build_resolve_match(
+            TEST_UUID, TEST_XADDRS, relates_to="urn:uuid:x",
+        )
+        env = parse_envelope(data)
+        assert env.to == WellKnownURI.WSA_ANONYMOUS
 
 
 class TestGetResponse:
@@ -106,6 +137,18 @@ class TestGetResponse:
         assert b"ThisModel" in data
         assert b"Relationship" in data
         assert b"Computers" in data
+
+    def test_get_response_wsa_to_is_anonymous(self):
+        # HTTP unicast response: <wsa:To> follows WS-Addressing
+        # reply semantics (anonymous by default).  The multicast-
+        # group URN (WSA_DISCOVERY) is wrong here — that's for
+        # messages *addressed* to the multicast group.
+        from truenas_pywsd.protocol.constants import WellKnownURI
+        data = build_get_response(
+            TEST_UUID, "HOST", "WG", relates_to="urn:uuid:get-1",
+        )
+        env = parse_envelope(data)
+        assert env.to == WellKnownURI.WSA_ANONYMOUS
 
 
 class TestParseProbe:

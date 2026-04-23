@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 
-from truenas_pydiscovery_utils.daemon import BaseDaemon
+from truenas_pydiscovery_utils.daemon import ConfigDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
 
 from .config import DaemonConfig, ServiceConfig, get_hostname
@@ -67,18 +67,31 @@ class PerInterfaceState:
         self.prober: Prober | None = None
         self.announcer: Announcer | None = None
 
+    async def stop(self) -> None:
+        """Cancel every owned sub-task and stop the transport.
 
-class MDNSServer(BaseDaemon):
+        Goodbye traffic is the daemon's job — it needs access to the
+        record registry to choose what to say goodbye about — so
+        that stays in ``_stop`` / reload paths.  This method handles
+        resource teardown only.
+        """
+        if self.responder is not None:
+            self.responder.cancel_all()
+        if self.prober is not None:
+            self.prober.cancel_all()
+        if self.announcer is not None:
+            self.announcer.cancel_all()
+        await self.transport.stop()
+
+
+class MDNSServer(ConfigDaemon):
     """Top-level mDNS daemon."""
 
     def __init__(self, config: DaemonConfig) -> None:
-        super().__init__(logger)
-        self._config = config
-        # Set by ``apply_config`` on SIGHUP so ``_reload`` can diff
-        # the outgoing config against the new one and pick a minimally
-        # disruptive reconciliation path.  ``None`` until the first
-        # SIGHUP, which forces a full rebuild.
-        self._prev_config: DaemonConfig | None = None
+        # ``ConfigDaemon`` initialises ``_config`` and
+        # ``_prev_config`` (and provides the stash-on-apply_config
+        # scaffolding ``_reload`` diffs against).
+        super().__init__(logger, config)
         self._hostname = get_hostname(config.server)
         self._fqdn = f"{self._hostname}.{config.server.domain_name}"
         self._interfaces: dict[int, PerInterfaceState] = {}
@@ -171,13 +184,7 @@ class MDNSServer(BaseDaemon):
                 )
 
         for ifstate in self._interfaces.values():
-            if ifstate.responder:
-                ifstate.responder.cancel_all()
-            if ifstate.prober:
-                ifstate.prober.cancel_all()
-            if ifstate.announcer:
-                ifstate.announcer.cancel_all()
-            await ifstate.transport.stop()
+            await ifstate.stop()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._write_status)
@@ -617,21 +624,15 @@ class MDNSServer(BaseDaemon):
 
     # -- Reload ---------------------------------------------------------------
 
-    def apply_config(self, new_config: DaemonConfig) -> None:
-        """Swap in a freshly-parsed config and re-derive cached attrs.
+    def _on_config_applied(self, new_config: DaemonConfig) -> None:
+        """Re-derive hostname and FQDN after a SIGHUP config swap.
 
-        Called by the composite parent before ``_reload()`` fans out,
-        so the reload picks up on-disk changes to hostname/domain/
-        interfaces/service-dir.  Without this, ``self._config`` stays
-        frozen at the value captured in ``__init__`` and SIGHUP is
-        only useful for files the daemon re-reads directly (the
-        services.d directory).
-
-        Stashes the outgoing config as ``_prev_config`` so the
-        subsequent ``_reload`` can diff old vs new and pick a
-        minimally disruptive reconciliation path."""
-        self._prev_config = self._config
-        self._config = new_config
+        ``ConfigDaemon.apply_config`` stashes ``_prev_config`` and
+        replaces ``_config`` for us; we only need to refresh the
+        cached fields derived from the new config so ``_reload``
+        (and everything it calls — responder/prober/announcer,
+        service loader, host-address registration) sees consistent
+        hostname/FQDN values."""
         self._hostname = get_hostname(new_config.server)
         self._fqdn = f"{self._hostname}.{new_config.server.domain_name}"
 
@@ -697,13 +698,7 @@ class MDNSServer(BaseDaemon):
         # ifstate refs — otherwise their TimerHandles and Tasks survive
         # the clear() and keep firing against closed transports.
         for ifstate in self._interfaces.values():
-            if ifstate.responder:
-                ifstate.responder.cancel_all()
-            if ifstate.prober:
-                ifstate.prober.cancel_all()
-            if ifstate.announcer:
-                ifstate.announcer.cancel_all()
-            await ifstate.transport.stop()
+            await ifstate.stop()
         self._interfaces.clear()
 
         for group in self._entry_groups:

@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 
-from truenas_pydiscovery_utils.daemon import BaseDaemon
+from truenas_pydiscovery_utils.daemon import ConfigDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
 
 from .config import DaemonConfig, get_hostname
@@ -44,18 +44,30 @@ class PerInterfaceState:
         # listeners.
         self.meta_handler: MetadataHandler | None = None
 
+    async def stop(self) -> None:
+        """Cancel owned sub-tasks and stop owned sockets / servers.
 
-class WSDServer(BaseDaemon):
+        Bye traffic is the daemon's job — it needs access to
+        endpoint UUID, instance id, and message counter — so that
+        stays in ``_stop`` / reload paths.  This method handles
+        resource teardown only.
+        """
+        if self.responder is not None:
+            self.responder.cancel_all()
+        for http in self.http_servers:
+            await http.stop()
+        if self.transport is not None:
+            await self.transport.stop()
+
+
+class WSDServer(ConfigDaemon):
     """Top-level WSD daemon."""
 
     def __init__(self, config: DaemonConfig) -> None:
-        super().__init__(logger)
-        self._config = config
-        # Set by ``apply_config`` on SIGHUP so ``_reload`` can diff
-        # the outgoing config against the new one and pick a
-        # minimally disruptive reconciliation path.  ``None`` until
-        # the first SIGHUP, which forces a full rebuild.
-        self._prev_config: DaemonConfig | None = None
+        # ``ConfigDaemon`` initialises ``_config`` and
+        # ``_prev_config`` (and provides the stash-on-apply_config
+        # scaffolding ``_reload`` diffs against).
+        super().__init__(logger, config)
         self._hostname = get_hostname(config.server)
         self._endpoint_uuid = str(uuid.uuid5(
             uuid.NAMESPACE_DNS, self._hostname,
@@ -129,25 +141,11 @@ class WSDServer(BaseDaemon):
 
         # Stop HTTP servers and transports
         for ifstate in self._interfaces.values():
-            if ifstate.responder:
-                ifstate.responder.cancel_all()
-            for http in ifstate.http_servers:
-                await http.stop()
-            if ifstate.transport:
-                await ifstate.transport.stop()
+            await ifstate.stop()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._write_status)
         logger.info("WSD daemon stopped")
-
-    def apply_config(self, new_config: DaemonConfig) -> None:
-        """Swap in a freshly-parsed config.
-
-        Stashes the outgoing config as ``_prev_config`` so the
-        subsequent ``_reload`` can diff and pick a minimally
-        disruptive reload path."""
-        self._prev_config = self._config
-        self._config = new_config
 
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
@@ -199,12 +197,7 @@ class WSDServer(BaseDaemon):
                     app_sequence=self._instance_id,
                     message_number=self._next_msg_number(),
                 )
-            if ifstate.responder:
-                ifstate.responder.cancel_all()
-            for http in ifstate.http_servers:
-                await http.stop()
-            if ifstate.transport:
-                await ifstate.transport.stop()
+            await ifstate.stop()
         self._interfaces.clear()
 
         old_endpoint_uuid = self._endpoint_uuid
@@ -403,7 +396,18 @@ class WSDServer(BaseDaemon):
 
         try:
             envelope = parse_envelope(data)
-        except (ValueError, Exception):
+        except ValueError as e:
+            # Malformed SOAP / XML from a peer.  Log at debug — this
+            # is the remote peer's bug, not ours, and noisy peers
+            # shouldn't fill the ERROR log.  The per-class counter
+            # in status.json lets operators tell "network full of
+            # broken clients" from "our server has never seen a
+            # packet" without tailing the log.
+            logger.debug(
+                "Discarded malformed WSD datagram from %s: %s",
+                source, e,
+            )
+            self._status.inc("parse_errors")
             return
 
         if ifstate.responder:

@@ -107,15 +107,14 @@ def _dispatch_unified_config(
                 "restart truenas-discoveryd to apply", name,
             )
             continue
-        apply = getattr(child, "apply_config", None)
-        if apply is None:
-            logger.warning(
-                "Reload: child %s has no apply_config(); "
-                "its _reload() will run with stale config", name,
-            )
-            continue
+        # ``apply_config`` is declared on ``BaseDaemon`` with a
+        # no-op default (see truenas_pydiscovery_utils/daemon.py),
+        # so the call is always safe.  Subclasses that want to
+        # support live-reload override it; those that don't will
+        # silently skip their config update and re-read at
+        # ``_reload`` time.
         try:
-            apply(sub)
+            child.apply_config(sub)
         except Exception:
             logger.exception(
                 "Reload: child %s failed to apply new config", name,

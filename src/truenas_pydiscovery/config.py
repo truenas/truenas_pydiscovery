@@ -11,12 +11,30 @@ The loader produces an existing per-protocol ``DaemonConfig``
 dataclass for each enabled section, leaving the per-protocol config
 types unchanged.  Disabled protocols are represented by ``None`` in
 the returned ``UnifiedConfig``.
+
+Interface token grammar
+-----------------------
+``interfaces`` is a comma-separated list of tokens.  Accepted
+forms depend on where the list lives:
+
+- ``[discovery] interfaces`` — **names only** (e.g. ``eth0``).
+  Every protocol must be able to resolve every shared token, and
+  only interface names are universally resolvable.  IP / CIDR
+  tokens in the shared section raise ``ValueError`` at load time.
+- ``[mdns] interfaces`` and ``[wsd] interfaces`` — **names only**
+  (enforced by each protocol's ``ServerConfig.__post_init__``).
+- ``[netbiosns] interfaces`` — names, bare IPv4 (``192.168.1.5``),
+  or CIDR (``192.168.1.0/24``).  NBNS's ``resolve_subnets`` uses
+  the richer forms to pin one specific address or override the
+  kernel netmask for an explicit subnet.
 """
 from __future__ import annotations
 
 import configparser
 from dataclasses import dataclass
 from pathlib import Path
+
+from truenas_pydiscovery_utils.interface_tokens import require_names_only
 
 from truenas_pymdns.server.config import (
     DaemonConfig as MdnsConfig,
@@ -91,7 +109,12 @@ def _build_mdns(
     if cp.has_section("mdns"):
         s = cp["mdns"]
         if "interfaces" in s:
-            cfg.server.interfaces = _parse_list(s["interfaces"])
+            # Validate the per-protocol override before assigning —
+            # the ServerConfig's ``__post_init__`` only fires at
+            # construction, not on post-construction mutation.
+            cfg.server.interfaces = require_names_only(
+                _parse_list(s["interfaces"]),
+            )
         if "host-name" in s:
             cfg.server.host_name = s["host-name"]
         cfg.server.domain_name = s.get("domain-name", cfg.server.domain_name)
@@ -181,7 +204,12 @@ def _build_wsd(
     if cp.has_section("wsd"):
         s = cp["wsd"]
         if "interfaces" in s:
-            cfg.server.interfaces = _parse_list(s["interfaces"])
+            # Validate the per-protocol override before assigning —
+            # dataclass ``__post_init__`` only validates at
+            # construction, not on post-construction mutation.
+            cfg.server.interfaces = require_names_only(
+                _parse_list(s["interfaces"]),
+            )
         if "hostname" in s:
             cfg.server.hostname = s["hostname"]
         if "workgroup" in s:
@@ -225,6 +253,18 @@ def load_unified_config(
             shared_workgroup = d["workgroup"]
         if "rundir" in d:
             rundir = Path(d["rundir"])
+
+    # The shared ``[discovery] interfaces`` list must be valid for
+    # every protocol the daemon hosts.  Only interface names meet
+    # that bar — IP and CIDR tokens are NBNS-specific and fail as
+    # inputs to mDNS / WSD resolvers.  Operators who want
+    # NBNS-only richness put it in ``[netbiosns] interfaces``.
+    # ``require_names_only`` raises ``ValueError`` at parse time
+    # naming the offending token, so an operator who writes a
+    # CIDR in the shared section sees the failure immediately
+    # instead of a per-token "Interface not found" log at daemon
+    # start.
+    require_names_only(shared_interfaces)
 
     unified = UnifiedConfig(rundir=rundir)
     if _section_enabled(cp, "mdns"):

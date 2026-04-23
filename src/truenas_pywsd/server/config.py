@@ -15,6 +15,8 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from truenas_pydiscovery_utils.interface_tokens import require_names_only
+
 # Legacy stand-alone config path (no longer used by the production
 # daemon — retained as the parameter default for ``load_daemon_config``
 # so tests and external callers get a predictable path).
@@ -26,13 +28,23 @@ DEFAULT_RUNDIR = Path("/run/truenas-discovery/wsd")
 
 @dataclass(slots=True)
 class ServerConfig:
-    """Core server settings."""
+    """Core server settings.
+
+    ``interfaces`` is a list of Linux interface names — WSD has no
+    use for IP or CIDR tokens (those are NBNS-specific).
+    ``__post_init__`` rejects non-name tokens with a ``ValueError``
+    so a config mistake fails at dataclass construction rather than
+    silently dropping the non-resolvable token with a "Interface
+    not found" log at daemon start."""
     hostname: str = ""
     workgroup: str = "WORKGROUP"
     domain: str = ""
     interfaces: list[str] = field(default_factory=list)
     use_ipv4: bool = True
     use_ipv6: bool = True
+
+    def __post_init__(self) -> None:
+        require_names_only(self.interfaces)
 
 
 @dataclass(slots=True)

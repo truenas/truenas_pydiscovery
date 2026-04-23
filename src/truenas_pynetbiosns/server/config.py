@@ -16,6 +16,8 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from truenas_pydiscovery_utils.interface_tokens import classify_token
+
 # Legacy stand-alone config path (no longer used by the production
 # daemon — retained as the parameter default for ``load_daemon_config``
 # so tests and external callers get a predictable path).
@@ -99,6 +101,12 @@ class ServerConfig:
             validate_netbios_name(alias)
         if self.workgroup:
             validate_netbios_domain(self.workgroup)
+        # Accept all three token kinds (name / IPv4 / CIDR) — NBNS
+        # is the one protocol that uses the richer forms — but
+        # fail loudly on empty strings or malformed CIDRs rather
+        # than deferring the discovery of bad tokens to startup.
+        for tok in self.interfaces:
+            classify_token(tok)
 
 
 @dataclass(slots=True)

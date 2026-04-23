@@ -217,7 +217,74 @@ class TestReloadDispatch:
         assert nbns._config is orig_nbns_cfg
         assert wsd._config is orig_wsd_cfg
         assert any(
-            "failed to re-read" in r.message.lower()
+            "RELOAD-CONFIG-READ-FAILED" in r.message
+            for r in caplog.records
+        )
+        # Failure counter incremented so external monitors can
+        # detect silent reload failures without log scraping.
+        assert composite.reload_failure_counts == {
+            "reader": 1, "dispatch": 0,
+        }
+        assert composite.last_reload_error.startswith("reader:")
+
+    def test_dispatcher_failure_counted_separately(
+        self, tmp_path, caplog,
+    ):
+        """A raise inside ``config_dispatch`` counts as a dispatch
+        failure (not a reader failure) and logs a distinguishable
+        prefix — operators grepping for one kind of failure must
+        not see the other."""
+        mdns, nbns, wsd = _build_real_children(
+            tmp_path, hostname="old-host", netbios="OLDNAME",
+        )
+        new_cfg = _unified(
+            MdnsConfig(
+                server=MdnsServerConfig(host_name="h"),
+                service_dir=tmp_path / "none",
+                rundir=tmp_path,
+            ),
+            NbnsConfig(
+                server=NbnsServerConfig(
+                    netbios_name="NEWNAME", workgroup="WG",
+                ),
+                rundir=tmp_path,
+            ),
+            WsdConfig(
+                server=WsdServerConfig(hostname="h", workgroup="WG"),
+                rundir=tmp_path,
+            ),
+        )
+
+        def explode(children, new_config):
+            raise RuntimeError("dispatch exploded")
+
+        composite = _composite(
+            [
+                (ChildName.MDNS.value, mdns),
+                (ChildName.NETBIOSNS.value, nbns),
+                (ChildName.WSD.value, wsd),
+            ],
+            reloader=lambda: new_cfg,
+            dispatch=explode,
+        )
+
+        with caplog.at_level(
+            logging.ERROR, logger="test.composite.reload",
+        ):
+            asyncio.run(composite._reload())
+
+        assert composite.reload_failure_counts == {
+            "reader": 0, "dispatch": 1,
+        }
+        assert composite.last_reload_error.startswith("dispatch:")
+        assert any(
+            "RELOAD-DISPATCH-FAILED" in r.message
+            for r in caplog.records
+        )
+        # The reader-failure prefix must NOT be present — these
+        # two failure modes are distinct signals.
+        assert not any(
+            "RELOAD-CONFIG-READ-FAILED" in r.message
             for r in caplog.records
         )
 

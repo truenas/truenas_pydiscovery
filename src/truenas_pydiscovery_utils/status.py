@@ -28,8 +28,15 @@ class StatusWriter:
         """Increment a named counter by *n*."""
         self._counters[counter] = self._counters.get(counter, 0) + n
 
-    def write(self, server_state: dict) -> None:
-        """Write status.json atomically (write to tmp + rename)."""
+    def write(self, server_state: dict) -> bool:
+        """Write status.json atomically (write to tmp + rename).
+
+        Returns True on success, False on any filesystem or JSON
+        encoding error.  Swallowing errors silently leaves
+        operators looking at a stale status file with no runtime
+        signal that it stopped updating — callers can use the
+        return value to raise a warning, trip a health bit, or log
+        at a higher severity than the internal error log."""
         self._rundir.mkdir(parents=True, exist_ok=True)
 
         status = {
@@ -52,8 +59,13 @@ class StatusWriter:
                 self._logger.info(
                     "Status written to %s", self._status_path,
                 )
+                return True
             except Exception:
-                os.unlink(tmp_path)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
                 raise
         except Exception as e:
             self._logger.error("Failed to write status: %s", e)
+            return False

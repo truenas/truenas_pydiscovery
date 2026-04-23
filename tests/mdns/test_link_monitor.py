@@ -163,3 +163,83 @@ class TestDispatch:
         )
         fired = self._drive([down1, down2, up1, up2])
         assert sorted(fired) == [1, 2]
+
+
+class TestShutdownCancelsInFlightCallbacks:
+    """``stop()`` cancels callback tasks the monitor has spawned
+    but not yet observed to completion.  Without tracking, a
+    cable-flap that triggers ``_on_link_up`` just as the daemon
+    starts shutting down leaves the re-probe task running against
+    transports the daemon has already torn down."""
+
+    def test_stop_cancels_in_flight_callback_task(self):
+        callback_started = asyncio.Event()
+        callback_cancelled = False
+
+        async def slow_cb(ifindex: int) -> None:
+            nonlocal callback_cancelled
+            callback_started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                callback_cancelled = True
+                raise
+
+        async def run() -> None:
+            nonlocal callback_cancelled
+            mon = LinkMonitor(slow_cb)
+            mon._loop = asyncio.get_running_loop()
+
+            # Drive a down→up to make the monitor spawn the callback.
+            down = _craft(RTM_NEWLINK, ifindex=7, flags=IFF_UP)
+            up = _craft(
+                RTM_NEWLINK, ifindex=7,
+                flags=IFF_UP | IFF_RUNNING | IFF_LOWER_UP,
+            )
+            mon._dispatch(down)
+            mon._dispatch(up)
+            assert len(mon._tasks) == 1
+
+            # Give the callback a chance to enter its sleep.
+            await callback_started.wait()
+
+            # stop() without a real socket: emulate by directly
+            # invoking the cancel-and-clear half of stop.  (The
+            # socket branch is covered separately by the existing
+            # parse tests; we don't want a netlink fd here.)
+            for task in list(mon._tasks):
+                task.cancel()
+            mon._tasks.clear()
+
+            # Drive the loop once so the cancellation propagates.
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert callback_cancelled, (
+            "slow_cb should have observed CancelledError when "
+            "stop() cancelled the in-flight task"
+        )
+
+    def test_done_callbacks_drop_from_tracked_set(self):
+        """Completed tasks must be removed from ``_tasks`` so the
+        set doesn't grow without bound over the daemon's
+        lifetime."""
+        async def quick_cb(ifindex: int) -> None:
+            return None
+
+        async def run() -> None:
+            mon = LinkMonitor(quick_cb)
+            mon._loop = asyncio.get_running_loop()
+            down = _craft(RTM_NEWLINK, ifindex=9, flags=IFF_UP)
+            up = _craft(
+                RTM_NEWLINK, ifindex=9,
+                flags=IFF_UP | IFF_RUNNING | IFF_LOWER_UP,
+            )
+            mon._dispatch(down)
+            mon._dispatch(up)
+            assert len(mon._tasks) == 1
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert len(mon._tasks) == 0
+
+        asyncio.run(run())

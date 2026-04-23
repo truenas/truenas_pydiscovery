@@ -73,6 +73,18 @@ class CompositeDaemon(BaseDaemon):
         # pending-config state across iterations.  Operators who
         # edit config during a reload re-send SIGHUP.
         self._reload_running = False
+        # Failure counters observable by operators via
+        # ``reload_failure_counts`` (or direct attribute access).
+        # Distinguishing the two failure sites matters: a reloader
+        # failure means the config file itself is broken; a
+        # dispatch failure means the slice-and-apply step raised
+        # (usually a schema mismatch).  Both currently log and
+        # swallow so the daemon keeps running — these counters are
+        # the runtime signal operators can poll for "did any
+        # reloads silently fail?"
+        self._reload_reader_failures = 0
+        self._reload_dispatch_failures = 0
+        self._last_reload_error: str = ""
 
     async def _start(
         self, loop: asyncio.AbstractEventLoop,
@@ -144,30 +156,67 @@ class CompositeDaemon(BaseDaemon):
     async def _refresh_child_configs(self) -> None:
         """Invoke the config reloader + dispatcher before fan-out.
 
-        Errors from either step are logged and swallowed — we still
-        fan SIGHUP out so children can re-probe interfaces etc., just
-        with whatever config they already have."""
+        Errors from either step are logged and counted — we still
+        fan SIGHUP out so children can re-probe interfaces etc.,
+        just with whatever config they already have.  Counters on
+        ``self._reload_reader_failures`` /
+        ``self._reload_dispatch_failures`` give operators a
+        runtime signal beyond log scraping: the log already shows
+        the failure, but the counters let a status dumper /
+        external monitor detect "reloads have silently failed N
+        times since start" even when nobody's tailing the log."""
         reloader = self._config_reloader
         if reloader is None:
             return
         loop = asyncio.get_running_loop()
         try:
             new_config = await loop.run_in_executor(None, reloader)
-        except Exception:
+        except Exception as e:
+            self._reload_reader_failures += 1
+            self._last_reload_error = f"reader: {e}"
             self._logger.exception(
-                "Reload: failed to re-read config; "
-                "fanning out SIGHUP with previous config",
+                "RELOAD-CONFIG-READ-FAILED: "
+                "reloader raised; fanning out SIGHUP with previous "
+                "config (total reader failures: %d)",
+                self._reload_reader_failures,
             )
             return
         if self._config_dispatch is None:
             return
         try:
             self._config_dispatch(self._children, new_config)
-        except Exception:
+        except Exception as e:
+            self._reload_dispatch_failures += 1
+            self._last_reload_error = f"dispatch: {e}"
             self._logger.exception(
-                "Reload: config dispatch raised; "
-                "children may hold stale config",
+                "RELOAD-DISPATCH-FAILED: "
+                "config dispatch raised; children may hold stale "
+                "config (total dispatch failures: %d)",
+                self._reload_dispatch_failures,
             )
+
+    @property
+    def reload_failure_counts(self) -> dict[str, int]:
+        """Snapshot of reload failure counters.
+
+        Returned as a plain dict so callers can embed it in a
+        status.json dump or other external health signal without
+        exposing internal attribute names.  ``reader`` counts
+        config-file read failures; ``dispatch`` counts per-child
+        apply_config failures (the dispatcher raising).  Both reset
+        only at daemon restart."""
+        return {
+            "reader": self._reload_reader_failures,
+            "dispatch": self._reload_dispatch_failures,
+        }
+
+    @property
+    def last_reload_error(self) -> str:
+        """Short human-readable description of the most recent
+        reload failure, or empty string if reloads have never
+        failed.  Format is ``"{site}: {exception_message}"`` where
+        site is ``reader`` or ``dispatch``."""
+        return self._last_reload_error
 
     def _write_status(self) -> None:
         """Fan SIGUSR1 out to every child."""

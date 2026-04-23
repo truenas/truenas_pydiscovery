@@ -120,6 +120,70 @@ workgroup = WG
         assert cfg.mdns.server.interfaces == ["eth1", "eth2"]
         assert cfg.netbiosns.server.interfaces == ["eth0"]
 
+    def test_discovery_interfaces_rejects_ipv4_token(self, tmp_path):
+        # The shared ``[discovery] interfaces`` list must be valid
+        # for every protocol the daemon hosts.  Bare IPv4 tokens
+        # are NBNS-specific and fail for mDNS/WSD — the loader
+        # rejects them at parse time rather than letting the
+        # daemon start and discover the mismatch via per-token
+        # "Interface not found" logs.
+        import pytest
+        with pytest.raises(ValueError, match="192.168.1.5"):
+            load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = eth0, 192.168.1.5
+
+[mdns]
+
+[netbiosns]
+workgroup = WG
+"""))
+
+    def test_discovery_interfaces_rejects_cidr_token(self, tmp_path):
+        # Same policy for CIDR — a network mask only makes sense
+        # to NBNS's subnet model.
+        import pytest
+        with pytest.raises(ValueError, match="192.168.1.0/24"):
+            load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = 192.168.1.0/24
+
+[netbiosns]
+workgroup = WG
+"""))
+
+    def test_nbns_specific_section_accepts_richer_tokens(
+        self, tmp_path,
+    ):
+        # NBNS-specific ``interfaces`` can carry IPs and CIDRs
+        # because NBNS's ``resolve_subnets`` and ``ServerConfig``
+        # accept all three kinds.  The shared section stays
+        # name-only (``eth0`` here), so the overall config loads
+        # without error.
+        cfg = load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = eth0
+
+[netbiosns]
+interfaces = 192.168.1.0/24, 10.0.0.5
+workgroup = WG
+"""))
+        assert cfg.netbiosns.server.interfaces == [
+            "192.168.1.0/24", "10.0.0.5",
+        ]
+
+    def test_mdns_section_rejects_non_name_token(self, tmp_path):
+        # Per-protocol override for mDNS also enforces names-only
+        # (via ``MdnsServerConfig.__post_init__``).  A CIDR in
+        # ``[mdns] interfaces`` fails just like one in the shared
+        # section.
+        import pytest
+        with pytest.raises(ValueError, match="192.168.1.0/24"):
+            load_unified_config(_write(tmp_path, """
+[mdns]
+interfaces = 192.168.1.0/24
+"""))
+
     def test_shared_hostname_and_workgroup(self, tmp_path):
         cfg = load_unified_config(_write(tmp_path, """
 [discovery]

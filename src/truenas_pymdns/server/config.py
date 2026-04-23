@@ -43,6 +43,7 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from truenas_pydiscovery_utils.interface_tokens import require_names_only
 from truenas_pymdns.protocol.constants import (
     DEFAULT_CACHE_MAX_ENTRIES,
     MAX_UINT16,
@@ -70,7 +71,14 @@ DEFAULT_RUNDIR = Path("/run/truenas-discovery/mdns")
 
 @dataclass(slots=True)
 class ServerConfig:
-    """Core server settings: hostname, interfaces, protocols."""
+    """Core server settings: hostname, interfaces, protocols.
+
+    ``interfaces`` is a list of Linux interface names — mDNS has no
+    use for IP or CIDR tokens (those are NBNS-specific).
+    ``__post_init__`` rejects non-name tokens with a ``ValueError``
+    so a config mistake fails at dataclass construction rather than
+    silently dropping the non-resolvable token with a per-token
+    "Interface not found" log at daemon start."""
     host_name: str = ""
     domain_name: str = "local"
     interfaces: list[str] = field(default_factory=list)
@@ -79,6 +87,9 @@ class ServerConfig:
     cache_entries_max: int = DEFAULT_CACHE_MAX_ENTRIES
     ratelimit_interval_usec: int = 1_000_000
     ratelimit_burst: int = 1000
+
+    def __post_init__(self) -> None:
+        require_names_only(self.interfaces)
 
 
 @dataclass(slots=True)

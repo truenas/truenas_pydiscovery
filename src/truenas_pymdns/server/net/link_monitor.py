@@ -118,6 +118,12 @@ class LinkMonitor:
         # seen; we don't fire the callback on the initial dump because
         # those interfaces were already up when we started.
         self._state: dict[int, bool] = {}
+        # Tasks spawned for callback invocations.  Tracked so
+        # ``stop()`` can cancel in-flight re-probe work — otherwise
+        # the callback task outlives the daemon on shutdown and
+        # touches state (``self._interfaces``, transports) that
+        # has already been torn down.
+        self._tasks: set[asyncio.Task] = set()
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Open the netlink socket and register its fd with *loop*."""
@@ -132,12 +138,16 @@ class LinkMonitor:
         logger.info("LinkMonitor started (AF_NETLINK / RTMGRP_LINK)")
 
     def stop(self) -> None:
-        """Unregister the fd and close the socket."""
+        """Unregister the fd, cancel in-flight callback tasks, close the socket."""
         if self._sock is not None and self._loop is not None:
             try:
                 self._loop.remove_reader(self._sock.fileno())
             except (ValueError, RuntimeError):
                 pass
+            for task in list(self._tasks):
+                if not task.done():
+                    task.cancel()
+            self._tasks.clear()
             self._sock.close()
             self._sock = None
             self._loop = None
@@ -170,4 +180,8 @@ class LinkMonitor:
                     "(RFC 6762 §8.3 / BCT II.17)",
                     event.ifindex,
                 )
-                self._loop.create_task(self._callback(event.ifindex))
+                task = self._loop.create_task(
+                    self._callback(event.ifindex),
+                )
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)

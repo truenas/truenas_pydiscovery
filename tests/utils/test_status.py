@@ -47,3 +47,31 @@ class TestStatusWriter:
         sw.write({"ok": True})
 
         assert (rundir / "status.json").exists()
+
+    def test_write_returns_true_on_success(self, tmp_path):
+        log = logging.getLogger("test.status")
+        sw = StatusWriter(tmp_path, log)
+        assert sw.write({"state": "running"}) is True
+
+    def test_write_returns_false_on_json_encoding_error(
+        self, tmp_path, caplog,
+    ):
+        # ``default=str`` in the json.dump call covers most oddballs,
+        # but a value that raises inside its own ``__str__`` still
+        # bubbles out as a JSON encoding failure.  The write must
+        # return False (caller-observable) and log an error, rather
+        # than claim success and leave an empty status.
+        log = logging.getLogger("test.status")
+        sw = StatusWriter(tmp_path, log)
+
+        class _BadRepr:
+            def __str__(self):
+                raise RuntimeError("explode in __str__")
+
+        with caplog.at_level(logging.ERROR, logger="test.status"):
+            assert sw.write({"bad": _BadRepr()}) is False
+        # Error was surfaced in the log too.
+        assert any(
+            "Failed to write status" in r.message
+            for r in caplog.records
+        )

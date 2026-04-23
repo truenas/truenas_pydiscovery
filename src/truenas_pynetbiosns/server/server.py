@@ -5,7 +5,7 @@ import asyncio
 import logging
 from ipaddress import IPv4Address
 
-from truenas_pydiscovery_utils.daemon import BaseDaemon
+from truenas_pydiscovery_utils.daemon import ConfigDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
 
 from .config import DaemonConfig, get_netbios_name
@@ -56,18 +56,29 @@ class PerSubnetState:
         self.responder: Responder | None = None
         self.browse_announcer: BrowseAnnouncer | None = None
 
+    def stop(self) -> None:
+        """Cancel owned periodic tasks.
 
-class NBNSServer(BaseDaemon):
+        The transport is NOT stopped here: it's shared across every
+        subnet living on the same interface, so its lifecycle is
+        daemon-owned (``_transports`` dict).  Name releases are
+        protocol-level behaviour and stay in the daemon where the
+        broadcast-send closure is built.
+        """
+        if self.refresher is not None:
+            self.refresher.cancel()
+        if self.browse_announcer is not None:
+            self.browse_announcer.cancel()
+
+
+class NBNSServer(ConfigDaemon):
     """Top-level NetBIOS Name Service daemon."""
 
     def __init__(self, config: DaemonConfig) -> None:
-        super().__init__(logger)
-        self._config = config
-        # Set by ``apply_config`` on SIGHUP so ``_reload`` can diff
-        # the outgoing config against the new one and pick a
-        # minimally disruptive reconciliation path.  ``None`` until
-        # the first SIGHUP, which forces a full rebuild.
-        self._prev_config: DaemonConfig | None = None
+        # ``ConfigDaemon`` initialises ``_config`` and
+        # ``_prev_config`` (and provides the stash-on-apply_config
+        # scaffolding ``_reload`` diffs against).
+        super().__init__(logger, config)
         self._netbios_name = get_netbios_name(config.server)
         self._workgroup = config.server.workgroup.upper()
         # ifname -> transport shared by all subnets on that interface
@@ -136,10 +147,7 @@ class NBNSServer(BaseDaemon):
             )
 
         for state in self._subnets:
-            if state.refresher:
-                state.refresher.cancel()
-            if state.browse_announcer:
-                state.browse_announcer.cancel()
+            state.stop()
 
         if self._global_recv is not None:
             await self._global_recv.stop()
@@ -154,16 +162,6 @@ class NBNSServer(BaseDaemon):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._write_status)
         logger.info("NetBIOS NS daemon stopped")
-
-    def apply_config(self, new_config: DaemonConfig) -> None:
-        """Swap in a freshly-parsed config.
-
-        Stashes the outgoing config as ``_prev_config`` so the
-        subsequent ``_reload`` can diff old vs new and take either
-        a full rebuild (interfaces changed) or a live-update path
-        (names / workgroup / server_string changed)."""
-        self._prev_config = self._config
-        self._config = new_config
 
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
@@ -204,10 +202,7 @@ class NBNSServer(BaseDaemon):
         logger.info("Reload: full rebuild")
 
         for state in self._subnets:
-            if state.refresher:
-                state.refresher.cancel()
-            if state.browse_announcer:
-                state.browse_announcer.cancel()
+            state.stop()
             release_all_names(
                 _broadcast_sender(state.transport, state.subnet),
                 state.name_table,

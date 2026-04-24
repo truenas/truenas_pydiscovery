@@ -2,8 +2,11 @@
 
 Pure-Python network service discovery for TrueNAS. A single
 `truenas-discoveryd` daemon hosts mDNS/DNS-SD, NetBIOS Name Service,
-and Web Services Discovery in one process; per-protocol client tools
-ship alongside it as thin network clients that don't need the daemon.
+and Web Services Discovery in one process; per-protocol CLI query
+tools ship alongside it for development and debugging — they send
+queries directly on the network without the daemon, but are not
+full-featured browsing clients (see [Client Tools](#client-tools)
+below).
 
 ## Layout
 
@@ -164,6 +167,42 @@ All client tools query the network directly — no daemon required.
 All support `--json` for machine-readable JSONL output.  Each tool
 ships a section-1 man page; run `man <tool>` after install or view
 the source under `debian/man/`.
+
+### Scope: development and debugging only
+
+These tools are provided to inspect what peers advertise on the
+wire, verify the daemon's own announcements, and debug interop
+problems — not to act as production-quality browsing clients.
+They lack the persistent-cache and passive-listener machinery that
+a continuously-updating "network browser" UI expects.  Pointers to
+the spec sections that define the missing behaviour:
+
+- **mDNS.**  The CLI tools (`mdns-browse`, `mdns-resolve`,
+  `mdns-lookup`) issue one-shot / short-lived QU queries and print
+  whatever unicast responses arrive inside the timeout window.
+  They do not maintain an mDNS record cache across invocations,
+  which is the foundation RFC 6762 builds its cache-coherency
+  mechanisms on: Known-Answer Suppression on continuous queries
+  (§7.1, a MUST for §5.2 continuous queriers), TTL-driven re-query
+  at 80/85/90/95% of record lifetime (§5.2, §10), Passive
+  Observation Of Failures (§10.5), and the one-second deferred
+  delete on TTL=0 goodbye packets (§10.1).  `mdns-browse` in
+  particular just tracks a per-invocation "seen" set and never
+  emits removes.
+- **WSD.**  `wsd-discover` sends a Probe and consumes whatever
+  ProbeMatches / Hellos happen to arrive inside the timeout window.
+  It does not join the 3702 multicast group as a long-lived
+  listener — an Ad hoc Client SHOULD listen for Hello messages to
+  populate its cache and Bye messages to invalidate it
+  (WS-Discovery 1.1 §4.1.2, §4.2.2).
+- **NetBIOS.**  `nbt-lookup` and `nbt-status` implement the B-node
+  one-shot broadcast query (RFC 1002 §5.1.1.3), which the spec
+  does not pair with a client-side name cache — so there is less
+  gap here — but the tools still only do per-invocation lookups,
+  not continuous browsing.
+
+Turning any of these into a general-purpose browsing client would
+mean building the missing cache and listener machinery first.
 
 ### mDNS
 

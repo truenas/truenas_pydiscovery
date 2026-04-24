@@ -29,6 +29,7 @@ from truenas_pymdns.protocol.records import (
     MDNSRecordKey,
     PTRRecordData,
     SRVRecordData,
+    TXTRecordData,
 )
 from .net.interface import InterfaceInfo, resolve_interface
 from .net.link_monitor import LinkMonitor
@@ -900,6 +901,11 @@ class MDNSServer(ConfigDaemon):
 
         services = []
         for group in self._entry_groups:
+            txt_by_instance: dict[str, dict[str, str]] = {}
+            for rec in group.records:
+                if (rec.key.rtype == QType.TXT
+                        and isinstance(rec.data, TXTRecordData)):
+                    txt_by_instance[rec.key.name] = _decode_txt(rec.data)
             for rec in group.records:
                 if (rec.key.rtype == QType.SRV
                         and isinstance(rec.data, SRVRecordData)):
@@ -908,6 +914,7 @@ class MDNSServer(ConfigDaemon):
                         "port": rec.data.port,
                         "target": rec.data.target,
                         "state": group.state.name.lower(),
+                        "txt": txt_by_instance.get(rec.key.name, {}),
                     })
 
         self._status.write({
@@ -919,6 +926,24 @@ class MDNSServer(ConfigDaemon):
                 len(g.records) for g in self._entry_groups
             ),
         })
+
+
+def _decode_txt(data: TXTRecordData) -> dict[str, str]:
+    """Decode TXT record kv entries into a JSON-friendly string dict.
+
+    RFC 6763 §6 TXT entries are byte strings shaped ``key=value`` (or
+    bare ``key`` for boolean keys).  Binary values are rare; decode
+    as UTF-8 with ``errors="replace"`` so any non-UTF-8 byte is still
+    serialisable.  Duplicate keys keep the last value, matching what
+    ``mdns-browse --json`` emits."""
+    out: dict[str, str] = {}
+    for entry in data.entries:
+        if not entry:
+            continue
+        text = entry.decode("utf-8", errors="replace")
+        key, sep, value = text.partition("=")
+        out[key] = value if sep else ""
+    return out
 
 
 def _obsolete_shared_records(

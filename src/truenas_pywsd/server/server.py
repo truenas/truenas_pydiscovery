@@ -298,6 +298,8 @@ class WSDServer(ConfigDaemon):
         self._status.write({
             "hostname": self._hostname,
             "endpoint_uuid": self._endpoint_uuid,
+            "workgroup": self._config.server.workgroup,
+            "domain": self._config.server.domain,
             "state": "running",
             "interfaces": ifaces,
         })

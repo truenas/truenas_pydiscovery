@@ -1,0 +1,77 @@
+.TH TRUENAS\-DISCOVERY\-STATUS 1 "2026-04-23" "truenas-pydiscovery" "User Commands"
+.SH NAME
+truenas\-discovery\-status \- dump truenas-discoveryd runtime state as JSON
+.SH SYNOPSIS
+.B truenas\-discovery\-status
+.RB [ \-\-rundir
+.IR DIR ]
+.RB [ \-\-timeout
+.IR SECONDS ]
+.RB [ \-\-pretty ]
+.SH DESCRIPTION
+.B truenas\-discovery\-status
+reads the
+.B truenas\-discoveryd
+pidfile, sends
+.B SIGUSR1
+to the daemon to refresh its per\-protocol
+.I status.json
+files, waits briefly for those files to be rewritten, and then prints
+a single merged JSON object on stdout.
+.PP
+The output has the shape:
+.nf
+\fR{
+  "pid": <daemon pid>,
+  "children": {
+    "mdns": { \&...\& },
+    "netbiosns": { \&...\& },
+    "wsd": { \&...\& }
+  }
+}\fP
+.fi
+Each child key is present only when that protocol is enabled and has
+written a
+.I status.json
+since daemon startup.
+.PP
+Must be run as root or as the
+.B truenas\-discovery
+user so the
+.B SIGUSR1
+delivery is permitted.
+.SH OPTIONS
+.TP
+.BI \-\-rundir " DIR"
+Daemon runtime directory containing the pidfile and per\-protocol
+.I status.json
+files.
+Default:
+.IR /run/truenas\-discovery .
+.TP
+.BI \-\-timeout " SECONDS"
+Maximum seconds to wait for the daemon to rewrite its status files
+after
+.B SIGUSR1
+delivery.
+Default: 5.0.
+Use 0 to skip waiting and print whatever is already on disk.
+.TP
+.B \-\-pretty
+Pretty\-print the JSON output with indentation.
+.SH EXIT STATUS
+.TP
+.B 0
+Status was printed successfully.
+.TP
+.B 1
+Daemon is not running (pidfile missing or stale), signal delivery
+failed, or a status file could not be read.
+.SH EXAMPLES
+.nf
+truenas\-discovery\-status | jq \&.children.mdns.hostname
+truenas\-discovery\-status \-\-pretty
+truenas\-discovery\-status \-\-timeout 0
+.fi
+.SH SEE ALSO
+.BR truenas\-discoveryd (8)

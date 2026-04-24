@@ -15,6 +15,7 @@ dependencies = ["defusedxml"]
 
 [project.scripts]
 truenas-discoveryd = "truenas_pydiscovery.server.__main__:main"
+truenas-discovery-status = "truenas_pydiscovery.cli.status:main"
 mdns-browse = "truenas_pymdns.client.cli.browse:main"
 mdns-resolve = "truenas_pymdns.client.cli.resolve:main"
 mdns-lookup = "truenas_pymdns.client.cli.lookup:main"

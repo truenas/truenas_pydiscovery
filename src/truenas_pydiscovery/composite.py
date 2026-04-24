@@ -66,6 +66,7 @@ def build_composite_daemon(
         config_dispatch=(
             _dispatch_unified_config if config_reloader is not None else None
         ),
+        pidfile=config.rundir / "truenas-discoveryd.pid",
     )
 
 

@@ -9,7 +9,7 @@ ship alongside it as thin network clients that don't need the daemon.
 
 | Package | Purpose | Role | Client Tools |
 |---------|---------|------|--------------|
-| `truenas_pydiscovery` | Unified daemon orchestrator | Entry point (`truenas-discoveryd`) | — |
+| `truenas_pydiscovery` | Unified daemon orchestrator | Entry point (`truenas-discoveryd`) | `truenas-discovery-status` |
 | `truenas_pymdns` | mDNS/DNS-SD (RFC 6762/6763) | Library module | `mdns-browse`, `mdns-resolve`, `mdns-lookup` |
 | `truenas_pynetbiosns` | NetBIOS NS + Browser (RFC 1001/1002, MS-BRWS) | Library module | `nbt-lookup`, `nbt-status` |
 | `truenas_pywsd` | Web Services Discovery (WS-Discovery 1.1, DPWS) | Library module | `wsd-discover`, `wsd-info` |
@@ -28,6 +28,7 @@ src/
     server/__main__.py          # truenas-discoveryd entry point
     config.py                   # Unified INI loader ([discovery] + per-protocol)
     composite.py                # Builds CompositeDaemon from enabled sections
+    cli/status.py               # truenas-discovery-status: dump unified state as JSON
 
   truenas_pymdns/               # mDNS/DNS-SD
     protocol/                   # Wire protocol (RFC 6762/6763)
@@ -86,8 +87,15 @@ than the bare binary:
 systemctl enable --now truenas-discoveryd      # start on boot + now
 systemctl reload truenas-discoveryd            # SIGHUP (rereads config + services.d/)
 systemctl kill -s SIGUSR1 truenas-discoveryd   # dump per-protocol status JSONs
+truenas-discovery-status                       # fetch + merge the status JSONs
 journalctl -u truenas-discoveryd -f            # follow stderr → journal
 ```
+
+The daemon writes a pidfile at `<rundir>/truenas-discoveryd.pid`
+(default `/run/truenas-discovery/truenas-discoveryd.pid`) on startup.
+`truenas-discovery-status` reads it, sends SIGUSR1, waits for each
+protocol's `status.json` to refresh, then prints one merged JSON object
+on stdout.  See [`truenas-discovery-status(1)`](debian/man/truenas-discovery-status.1).
 
 Unit highlights: runs as the unprivileged `truenas-discovery`
 system user (group `daemon`, created in `postinst`), with

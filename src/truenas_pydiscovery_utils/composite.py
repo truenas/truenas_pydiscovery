@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .daemon import BaseDaemon
@@ -45,6 +47,7 @@ class CompositeDaemon(BaseDaemon):
         *,
         config_reloader: ConfigReloader | None = None,
         config_dispatch: ConfigDispatcher | None = None,
+        pidfile: Path | None = None,
     ) -> None:
         """Create a composite wrapping *children*.
 
@@ -60,6 +63,11 @@ class CompositeDaemon(BaseDaemon):
         children (typically via each child's ``apply_config``).  Both
         default to ``None``, in which case SIGHUP just fans out with
         whatever config the children already hold.
+
+        *pidfile* is an optional path; when set, the composite writes
+        its own PID there after children are started and removes it
+        on shutdown.  ``truenas-discovery-status`` reads this file to
+        find the daemon's PID before sending SIGUSR1.
         """
         super().__init__(logger)
         if not children:
@@ -67,6 +75,7 @@ class CompositeDaemon(BaseDaemon):
         self._children: list[tuple[str, BaseDaemon]] = list(children)
         self._config_reloader = config_reloader
         self._config_dispatch = config_dispatch
+        self._pidfile = pidfile
         # True while a reload is in flight.  SIGHUPs arriving during
         # that window are dropped with a log line — the simpler
         # alternative to queueing, which would require carrying
@@ -103,9 +112,11 @@ class CompositeDaemon(BaseDaemon):
                 self._logger.error(
                     "Child %s failed to start: %s", name, res,
                 )
+        self._write_pidfile()
 
     async def _stop(self) -> None:
         """Stop every child concurrently.  Errors are logged, not re-raised."""
+        self._remove_pidfile()
         results = await asyncio.gather(
             *(child._stop() for _, child in self._children),
             return_exceptions=True,
@@ -115,6 +126,27 @@ class CompositeDaemon(BaseDaemon):
                 self._logger.error(
                     "Child %s failed to stop cleanly: %s", name, res,
                 )
+
+    def _write_pidfile(self) -> None:
+        if self._pidfile is None:
+            return
+        try:
+            self._pidfile.parent.mkdir(parents=True, exist_ok=True)
+            self._pidfile.write_text(f"{os.getpid()}\n")
+        except OSError as e:
+            self._logger.error(
+                "Failed to write pidfile %s: %s", self._pidfile, e,
+            )
+
+    def _remove_pidfile(self) -> None:
+        if self._pidfile is None:
+            return
+        try:
+            self._pidfile.unlink(missing_ok=True)
+        except OSError as e:
+            self._logger.error(
+                "Failed to remove pidfile %s: %s", self._pidfile, e,
+            )
 
     async def _reload(self) -> None:
         """Re-read config (if a reloader is wired up) and fan SIGHUP

@@ -98,6 +98,8 @@ def build_probe_match(
     relates_to: str,
     xaddrs: str = "",
     metadata_version: int = 1,
+    app_sequence: int = 0,
+    message_number: int = 1,
 ) -> bytes:
     """Build a ProbeMatches response (WS-Discovery 1.1 s5.3).
 
@@ -108,10 +110,20 @@ def build_probe_match(
     for messages actually addressed to the group.
 
     *xaddrs* is the transport URL set; when non-empty, emitted as
-    ``<wsd:XAddrs>``.  WS-Discovery §5.3 permits XAddrs in a
-    ProbeMatch as a SHOULD, and Windows WSDAPI includes it so peers
-    can POST the metadata Get without a follow-up multicast
-    Resolve — one round-trip per discovery instead of two."""
+    ``<wsd:XAddrs>``.  WS-Discovery 1.1 §5.3 makes XAddrs in a
+    ProbeMatch a conditional MUST — *"If a Target Service ... has
+    transport addresses ... at least one transport address MUST be
+    included"* — so a peer can POST the metadata Get without a
+    follow-up multicast Resolve (one round-trip per discovery
+    instead of two).
+
+    Carries the WS-Discovery 1.1 §7 ``<wsd:AppSequence>`` header (InstanceId +
+    MessageNumber).  WS-Discovery 1.1 §5.3 requires it on a
+    ProbeMatches sent in ad-hoc mode — *"MUST be included to allow
+    ordering discovery messages from a Target Service"* — so a
+    receiver (e.g. Windows WSDAPI) can order and age the host's
+    announcements.  Only the managed/Discovery-Proxy-over-HTTP case
+    omits it (TCP already preserves order)."""
     matches = ET.Element(qname(Prefix.WSD, Element.PROBE_MATCHES))
     match = ET.SubElement(matches, qname(Prefix.WSD, Element.PROBE_MATCH))
     _append_endpoint_reference(match, endpoint_uuid)
@@ -124,6 +136,7 @@ def build_probe_match(
     return build_envelope(
         Action.PROBE_MATCHES, matches, relates_to=relates_to,
         to=WellKnownURI.WSA_ANONYMOUS,
+        app_sequence=app_sequence, message_number=message_number,
     )
 
 
@@ -132,11 +145,17 @@ def build_resolve_match(
     xaddrs: str,
     relates_to: str,
     metadata_version: int = 1,
+    app_sequence: int = 0,
+    message_number: int = 1,
 ) -> bytes:
     """Build a ResolveMatches response (WS-Discovery 1.1 s6.3).
 
     Sent unicast to the Resolve originator; ``<wsa:To>`` uses the
-    anonymous URI for the same reason as ``build_probe_match``."""
+    anonymous URI for the same reason as ``build_probe_match``.
+
+    Carries the WS-Discovery 1.1 §7 ``<wsd:AppSequence>`` header;
+    §6.3 constrains it as for a ProbeMatches (§5.3), so it is
+    required on a ResolveMatches sent in ad-hoc mode."""
     matches = ET.Element(qname(Prefix.WSD, Element.RESOLVE_MATCHES))
     match = ET.SubElement(matches, qname(Prefix.WSD, Element.RESOLVE_MATCH))
     _append_endpoint_reference(match, endpoint_uuid)
@@ -148,6 +167,7 @@ def build_resolve_match(
     return build_envelope(
         Action.RESOLVE_MATCHES, matches, relates_to=relates_to,
         to=WellKnownURI.WSA_ANONYMOUS,
+        app_sequence=app_sequence, message_number=message_number,
     )
 
 

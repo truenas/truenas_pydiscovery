@@ -39,6 +39,15 @@ def _free_port() -> int:
     return port
 
 
+def _free_port6() -> int:
+    """Grab an ephemeral port on the IPv6 loopback."""
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.bind(("::1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def _http_post(
     host: str, port: int, body: bytes,
     headers: dict[str, str] | None = None,
@@ -238,3 +247,42 @@ class TestHandlerIntegration:
         assert b"application/soap+xml" in hdrs
         # Sanity: the SOAP namespace URI doesn't leak into headers.
         assert Namespace.SOAP.encode("ascii") not in hdrs
+
+
+class TestHTTPServerIPv6:
+    """The metadata HTTP server must bind and answer over IPv6 — the
+    server side of dual-stack discovery, where a peer that found us
+    over the ``ff02::c`` group POSTs its WS-Transfer Get to a
+    bracketed ``[IPv6]`` XAddr."""
+
+    def _echo_handler(self, body: bytes) -> bytes:
+        return build_envelope(
+            Action.GET_RESPONSE,
+            body_element=None,
+            relates_to=parse_envelope(body).message_id,
+        )
+
+    def test_get_served_over_ipv6_loopback(self):
+        port = _free_port6()
+        server = WSDHttpServer("::1", port, self._echo_handler)
+        req = build_envelope(
+            Action.GET, to=WellKnownURI.WSA_ANONYMOUS,
+            message_id="urn:uuid:v6-req",
+        )
+
+        async def drive() -> tuple[int, bytes]:
+            await server.start()
+            try:
+                loop = asyncio.get_running_loop()
+                status, _hdrs, body = await loop.run_in_executor(
+                    None, _http_post, "::1", port, req,
+                )
+                return status, body
+            finally:
+                await server.stop()
+
+        status, body = _run(drive())
+        assert status == 200
+        env = parse_envelope(body)
+        assert env.action == Action.GET_RESPONSE
+        assert env.relates_to == "urn:uuid:v6-req"

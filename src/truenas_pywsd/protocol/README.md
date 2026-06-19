@@ -31,6 +31,7 @@ When the daemon starts, it announces itself to the network:
        |                                               |
        |  HELLO (x4, 50-250ms jitter)                  |
        |  Action: .../discovery/Hello                  |
+       |  AppSequence: InstanceId/MessageNumber        |
        |  EndpointReference: urn:uuid:{uuid}           |
        |  Types: wsdp:Device pub:Computer              |
        |  XAddrs: http://192.168.1.100:5357/{uuid}     |
@@ -55,6 +56,7 @@ A Windows client searches for devices on the network:
        |  PROBE MATCH (unicast, x2)                      |
        |  Action: .../ProbeMatches                       |
        |  RelatesTo: {probe msg id}                      |
+       |  AppSequence: InstanceId/MessageNumber          |
        |  EndpointReference: urn:uuid:{uuid}             |
        |  Types: wsdp:Device pub:Computer                |
        |  XAddrs: http://...:5357/{uuid}                 |
@@ -77,6 +79,7 @@ Client resolves a specific device to get its metadata endpoint:
        |  RESOLVE MATCH (unicast, x2)            |
        |  Action: .../ResolveMatches             |
        |  RelatesTo: {resolve msg id}            |
+       |  AppSequence: InstanceId/MessageNumber  |
        |  EndpointReference: urn:uuid:{uuid}     |
        |  Types: wsdp:Device pub:Computer        |
        |  XAddrs: http://...:5357/{uuid}         |
@@ -123,6 +126,7 @@ When the daemon stops, it announces departure:
        |                                               |
        |  BYE (x4, 50-250ms jitter)                    |
        |  Action: .../discovery/Bye                    |
+       |  AppSequence: InstanceId/MessageNumber        |
        |  EndpointReference: urn:uuid:{uuid}           |
        |---------------------------------------------->|
 ```

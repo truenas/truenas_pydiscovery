@@ -160,8 +160,8 @@ class WSDServer(ConfigDaemon):
           wire behaviour.
         * **metadata live update** — only ``workgroup`` or
           ``domain`` changed.  Updates each per-interface
-          ``MetadataHandler`` in place and bumps ``_instance_id``;
-          no Bye on the wire."""
+          ``MetadataHandler`` in place and bumps
+          ``_metadata_version``; no Bye on the wire."""
         prev = self._prev_config
         cur = self._config
 
@@ -350,6 +350,12 @@ class WSDServer(ConfigDaemon):
             # propagate to future ProbeMatch/ResolveMatch without
             # rebuilding the responder.
             metadata_version=lambda: self._metadata_version,
+            # WSD 1.1 §5.3/§6.3: ProbeMatch/ResolveMatch carry the
+            # §7 AppSequence.  Share the daemon's InstanceId and its
+            # single global MessageNumber counter so match numbers
+            # stay monotonic alongside Hello/Bye.
+            instance_id=self._instance_id,
+            next_message_number=self._next_msg_number,
         )
 
         # Metadata handler for HTTP
@@ -377,6 +383,32 @@ class WSDServer(ConfigDaemon):
                 meta_handler.handle_request,
             )
             await http.start()
+            ifstate.http_servers.append(http)
+
+        # And on every link-local IPv6 address, so a client that
+        # discovered us over ff02::c can POST the metadata Get over
+        # IPv6 instead of falling back to (or failing without) IPv4.
+        # Binding a link-local address needs the interface zone
+        # (sin6_scope_id), passed here as the ``%ifname`` suffix; the
+        # XAddr we advertise stays zone-less (see _build_xaddrs).
+        # Best-effort: a v6 bind failure is logged and skipped so it
+        # can't take down this interface's working IPv4 listeners.
+        for iface_addr6 in iface.addrs_v6:
+            if not iface_addr6.ip.is_link_local:
+                continue
+            http = WSDHttpServer(
+                f"{iface_addr6.ip}%{iface.name}",
+                WSD_HTTP_PORT,
+                meta_handler.handle_request,
+            )
+            try:
+                await http.start()
+            except OSError as e:
+                logger.warning(
+                    "WSD IPv6 metadata listener bind failed on %s "
+                    "[%s]: %s", iface.name, iface_addr6.ip, e,
+                )
+                continue
             ifstate.http_servers.append(http)
 
         self._interfaces[iface.index] = ifstate
@@ -426,16 +458,29 @@ class WSDServer(ConfigDaemon):
         """Build the ``wsd:XAddrs`` string for metadata exchange.
 
         WS-Discovery 1.1 §5.3 defines ``XAddrs`` as a whitespace-
-        separated list of transport addresses.  When an interface has
-        multiple IPv4 addresses (one per subnet), we advertise one
-        URL per address so a client on any of those subnets gets a
-        reachable metadata endpoint — otherwise secondary-subnet
-        clients receive a URL they can't route to.
+        separated list of transport addresses.  We advertise one URL
+        per reachable metadata endpoint:
+
+        * every IPv4 address (one per subnet) so a client on any
+          subnet gets a routable endpoint; and
+        * every link-local IPv6 address, bracketed per RFC 3986
+          §3.2.2.  WSD is link-scoped — the ``ff02::c`` discovery
+          group is link-local — so, like wsdd and wsdd-native, we
+          serve metadata over the same link-local address the
+          discovery traffic uses (global / ULA v6 is intentionally
+          not advertised).  The URL carries no zone index: the peer
+          supplies its own zone from the interface the message
+          arrived on, so a server-side ``%ifname`` would be wrong.
+
+        Returns ``""`` only when the interface has neither an IPv4
+        address nor a link-local IPv6 address.
         """
-        if iface.addrs_v4:
-            urls = [
-                f"http://{a.ip}:{WSD_HTTP_PORT}/{self._endpoint_uuid}"
-                for a in iface.addrs_v4
-            ]
-            return " ".join(urls)
-        return ""
+        urls = [
+            f"http://{a.ip}:{WSD_HTTP_PORT}/{self._endpoint_uuid}"
+            for a in iface.addrs_v4
+        ]
+        urls += [
+            f"http://[{a.ip}]:{WSD_HTTP_PORT}/{self._endpoint_uuid}"
+            for a in iface.addrs_v6 if a.ip.is_link_local
+        ]
+        return " ".join(urls)

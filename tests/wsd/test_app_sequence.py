@@ -67,29 +67,44 @@ class TestHelloAndByeAppSequence:
         )
 
 
-class TestProbeAndResolveOmitAppSequence:
-    """RFC / WS-Discovery §7: AppSequence is required on Hello/Bye
-    (announcements) but MUST NOT appear on request/response messages
-    that are not announcements — Probe, Resolve, ProbeMatches,
-    ResolveMatches.  Our builders call ``build_envelope`` without
-    an ``app_sequence`` argument for those paths."""
+class TestProbeAndResolveMatchAppSequence:
+    """WS-Discovery 1.1 §5.3 / §6.3: a Target Service MUST include
+    the §7 ``<wsd:AppSequence>`` header on a ProbeMatches /
+    ResolveMatches sent in ad-hoc (multicast) mode — *"MUST be
+    included to allow ordering discovery messages from a Target
+    Service"* (§5.3).  Only the managed / Discovery-Proxy-over-HTTP
+    case omits it (TCP already preserves order); we are ad-hoc, so
+    the match builders always emit it.
 
-    def test_probe_match_has_no_appsequence(self):
-        data = build_probe_match("uuid-a", relates_to="urn:uuid:orig")
-        assert _extract_appseq(data) is None
-        assert b"AppSequence" not in data
+    The bare ``Probe`` / ``Resolve`` *requests* a Client sends are
+    not Target-Service messages and carry no AppSequence (see
+    ``test_probe_request_omits_appsequence``)."""
 
-    def test_resolve_match_has_no_appsequence(self):
+    def test_probe_match_includes_appsequence(self):
+        data = build_probe_match(
+            "uuid-a", relates_to="urn:uuid:orig",
+            app_sequence=1234, message_number=3,
+        )
+        seq = _extract_appseq(data)
+        assert seq is not None
+        assert seq["instance_id"] == 1234
+        assert seq["message_number"] == 3
+
+    def test_resolve_match_includes_appsequence(self):
         data = build_resolve_match(
             "uuid-a", xaddrs="http://x",
             relates_to="urn:uuid:orig",
+            app_sequence=1234, message_number=7,
         )
-        assert _extract_appseq(data) is None
-        assert b"AppSequence" not in data
+        seq = _extract_appseq(data)
+        assert seq is not None
+        assert seq["instance_id"] == 1234
+        assert seq["message_number"] == 7
 
-    def test_envelope_without_app_sequence_omits_header(self):
-        """If build_envelope is called without an app_sequence
-        argument at all, the AppSequence header must be absent."""
+    def test_probe_request_omits_appsequence(self):
+        """A Client-role Probe request is not a Target-Service
+        message, so build_envelope without an app_sequence must
+        leave the AppSequence header out."""
         data = build_envelope(Action.PROBE)
         assert b"AppSequence" not in data
 

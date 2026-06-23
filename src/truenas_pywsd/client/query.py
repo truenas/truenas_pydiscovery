@@ -71,9 +71,14 @@ def build_resolve(endpoint_uuid: str) -> bytes:
     Per WS-Discovery 1.1 §6.1, Resolve carries the target's endpoint
     reference; the owning device replies via unicast
     ResolveMatches containing XAddrs.  Clients need this fallback
-    because Windows hosts (by default) omit XAddrs from their
-    ProbeMatches for privacy — see Samba ``wsdd.py`` comment at
-    ``source3/script/wsdd.py:744``."""
+    because, although WS-Discovery 1.1 §5.3 makes XAddrs in a
+    ProbeMatch a conditional MUST (a Target Service that has
+    transport addresses MUST include at least one), not every
+    implementation complies — christgau/wsdd omits it by default
+    (on the mistaken assumption that Windows withholds the
+    transport address for privacy; real WSDAPI sends it).  A client
+    that received a ProbeMatch without XAddrs must Resolve to learn
+    the metadata endpoint."""
     resolve = ET.Element(qname(Prefix.WSD, Element.RESOLVE))
     epr = ET.SubElement(
         resolve, qname(Prefix.WSA, Element.ENDPOINT_REFERENCE),

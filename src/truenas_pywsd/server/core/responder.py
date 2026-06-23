@@ -100,6 +100,8 @@ class WSDResponder:
         addrs_v6: list[IPv6Interface],
         scopes: list[str] | None = None,
         metadata_version: Callable[[], int] = lambda: 1,
+        instance_id: int = 0,
+        next_message_number: Callable[[], int] = lambda: 1,
     ) -> None:
         self._send_unicast = send_unicast_fn
         self._endpoint_uuid = endpoint_uuid
@@ -118,6 +120,15 @@ class WSDResponder:
         # requires the version to increment monotonically whenever
         # metadata changes so clients know to re-fetch.
         self._get_metadata_version = metadata_version
+        # WS-Discovery 1.1 §5.3/§6.3: a ProbeMatches/ResolveMatches
+        # sent in ad-hoc (multicast) mode MUST carry a §7
+        # <wsd:AppSequence>.  ``instance_id`` is the daemon's fixed
+        # InstanceId; ``next_message_number`` draws from the
+        # server's single global counter so match numbers interleave
+        # monotonically with Hello/Bye (one number per response —
+        # the SOAP-over-UDP retransmissions reuse the same datagram).
+        self._instance_id = instance_id
+        self._next_message_number = next_message_number
         self._tasks: list[asyncio.Task] = []
 
     def _is_on_link(self, source: tuple) -> bool:
@@ -211,23 +222,36 @@ class WSDResponder:
         """Send ProbeMatch with random delay (WS-Discovery 1.1 s5.3).
 
         Includes ``<wsd:XAddrs>`` so peers skip the usual follow-up
-        multicast Resolve — matches Windows WSDAPI behaviour (the
-        Samba ``wsdd.py`` convention of omitting XAddrs was based
-        on an incorrect assumption about Windows's privacy stance)."""
+        multicast Resolve — matches Windows WSDAPI, which ships
+        XAddrs inline (christgau/wsdd omits it from ProbeMatches,
+        citing Windows privacy).
+
+        Carries the WS-Discovery 1.1 §7 ``<wsd:AppSequence>`` header
+        that §5.3 requires on a ProbeMatches in ad-hoc mode — one
+        MessageNumber per response (retransmissions reuse the same
+        datagram, so they share it)."""
         data = build_probe_match(
             self._endpoint_uuid, relates_to,
             xaddrs=self._xaddrs,
             metadata_version=self._get_metadata_version(),
+            app_sequence=self._instance_id,
+            message_number=self._next_message_number(),
         )
         await self._send_with_jitter(data, source, "ProbeMatch")
 
     async def _respond_resolve(
         self, relates_to: str, source: tuple,
     ) -> None:
-        """Send ResolveMatch with random delay (WS-Discovery 1.1 s6.3)."""
+        """Send ResolveMatch with random delay (WS-Discovery 1.1 s6.3).
+
+        Carries the WS-Discovery 1.1 §7 ``<wsd:AppSequence>`` header
+        that §6.3 (as constrained for §5.3) requires on a
+        ResolveMatches in ad-hoc mode."""
         data = build_resolve_match(
             self._endpoint_uuid, self._xaddrs, relates_to,
             metadata_version=self._get_metadata_version(),
+            app_sequence=self._instance_id,
+            message_number=self._next_message_number(),
         )
         await self._send_with_jitter(data, source, "ResolveMatch")
 

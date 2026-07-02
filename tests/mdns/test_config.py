@@ -1,4 +1,6 @@
 """Tests for config generation, parsing, and service file loading."""
+import logging
+
 import pytest
 from pathlib import Path
 from textwrap import dedent
@@ -222,6 +224,71 @@ class TestLoadServiceFile:
 
     def test_load_nonexistent_directory(self, tmp_path):
         assert load_service_directory(tmp_path / "nope") == []
+
+
+class TestServiceConfigPercentValues:
+    """DNS-SD TXT values are opaque and may contain ``%`` (e.g. a
+    URL-encoded share name).  configparser's default ``%``
+    interpolation would reject them on generate and raise on load;
+    ``interpolation=None`` on both sides must let them through
+    literally."""
+
+    def test_percent_in_txt_round_trips(self, tmp_path):
+        original = ServiceConfig(
+            service_type="_adisk._tcp",
+            port=9,
+            txt={"dk0": "adVN=Backup%20Volume,adVF=0x82"},
+        )
+        data = generate_service_config(original)
+        conf = tmp_path / "ADISK.conf"
+        conf.write_bytes(data)
+        loaded = load_service_config(conf)
+        assert loaded is not None
+        assert loaded.txt["dk0"] == "adVN=Backup%20Volume,adVF=0x82"
+
+    def test_percent_in_hand_written_txt_loads(self, tmp_path):
+        f = tmp_path / "svc.conf"
+        f.write_text(dedent("""\
+            [service]
+            type = _http._tcp
+            port = 80
+            [txt]
+            path = /a%2Fb
+        """))
+        loaded = load_service_config(f)
+        assert loaded is not None
+        assert loaded.txt["path"] == "/a%2Fb"
+
+
+class TestServiceConfigDropLogging:
+    """A malformed drop-in must be skipped *and* logged — silently
+    returning ``None`` is what made a broken ``ADISK.conf`` (and thus
+    Time Machine) vanish with no diagnostic."""
+
+    def test_missing_section_is_logged(self, tmp_path, caplog):
+        f = tmp_path / "ADISK.conf"
+        f.write_text("[txt]\nfoo = bar\n")
+        with caplog.at_level(logging.WARNING):
+            assert load_service_config(f) is None
+        assert "ADISK.conf" in caplog.text
+        assert "no [service] section" in caplog.text
+
+    def test_malformed_ini_is_logged(self, tmp_path, caplog):
+        # A bare line with no '=' / ':' is a configparser parse error.
+        f = tmp_path / "broken.conf"
+        f.write_text("[service]\ntype = _smb._tcp\nthis is not ini\n")
+        with caplog.at_level(logging.WARNING):
+            assert load_service_config(f) is None
+        assert "broken.conf" in caplog.text
+        assert "parse error" in caplog.text
+
+    def test_bad_port_is_logged(self, tmp_path, caplog):
+        f = tmp_path / "svc.conf"
+        f.write_text("[service]\ntype = _smb._tcp\nport = notaport\n")
+        with caplog.at_level(logging.WARNING):
+            assert load_service_config(f) is None
+        assert "svc.conf" in caplog.text
+        assert "non-integer port" in caplog.text
 
 
 class TestServiceToEntryGroup:

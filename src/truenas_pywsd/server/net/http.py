@@ -47,11 +47,27 @@ class WSDHttpServer:
         )
 
     async def stop(self) -> None:
-        """Stop the HTTP server."""
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        """Stop the HTTP server, dropping any in-flight connections.
+
+        ``Server.close()`` stops accepting new connections but leaves
+        connections that are already open running, and
+        ``wait_closed()`` then blocks until each one drains on its
+        own — for our metadata handler that is up to
+        ``HTTP_REQUEST_TIMEOUT_S`` (its read deadline).  A peer that is
+        mid-fetch, or merely holding an idle TCP connection, at
+        shutdown would otherwise stall the daemon's stop for seconds;
+        on a multi-homed host, where the WSD daemon binds one listener
+        per address, those stalls stack across listeners.
+        ``abort_clients()`` tears the live connections down at once so
+        ``wait_closed()`` returns immediately.
+        """
+        server = self._server
+        if server is None:
+            return
+        self._server = None
+        server.close()
+        server.abort_clients()
+        await server.wait_closed()
 
     async def _handle_connection(
         self,

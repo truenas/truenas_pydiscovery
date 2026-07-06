@@ -129,8 +129,30 @@ class WSDServer(ConfigDaemon):
     async def _stop(self) -> None:
         logger.info("Stopping WSD daemon")
 
-        # Send Bye
-        for ifstate in self._interfaces.values():
+        # Bye + teardown run concurrently across interfaces.  Each
+        # interface's Bye retransmission (SOAP-over-UDP 1.1 §3.4 —
+        # ~1s of jittered resends) and its listener teardown are
+        # independent, so serialising them would make stop latency
+        # scale with the interface count for no benefit.
+        await asyncio.gather(
+            *(self._bye_and_stop(ifstate)
+              for ifstate in self._interfaces.values())
+        )
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._write_status)
+        logger.info("WSD daemon stopped")
+
+    async def _bye_and_stop(self, ifstate: PerInterfaceState) -> None:
+        """Send this interface's Bye, then tear its sockets down.
+
+        The Bye is awaited before teardown so the farewell leaves the
+        wire before its transport closes.  Per-interface failures are
+        logged, not raised, so one bad interface can't strand the
+        others mid-shutdown or mid-reload.  Shared by ``_stop`` and
+        ``_full_rebuild_reload``, which both surrender every interface
+        concurrently."""
+        try:
             if ifstate.transport:
                 await send_bye(
                     ifstate.transport.send_multicast,
@@ -138,14 +160,11 @@ class WSDServer(ConfigDaemon):
                     app_sequence=self._instance_id,
                     message_number=self._next_msg_number(),
                 )
-
-        # Stop HTTP servers and transports
-        for ifstate in self._interfaces.values():
             await ifstate.stop()
-
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._write_status)
-        logger.info("WSD daemon stopped")
+        except Exception:
+            logger.exception(
+                "Error stopping WSD interface %s", ifstate.iface.name,
+            )
 
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
@@ -189,15 +208,15 @@ class WSDServer(ConfigDaemon):
         SIGHUP."""
         logger.info("Reload: full rebuild")
 
-        for ifstate in self._interfaces.values():
-            if ifstate.transport:
-                await send_bye(
-                    ifstate.transport.send_multicast,
-                    self._endpoint_uuid,
-                    app_sequence=self._instance_id,
-                    message_number=self._next_msg_number(),
-                )
-            await ifstate.stop()
+        # Surrender every current interface concurrently — same
+        # rationale as _stop: a serial Bye + teardown loop would make
+        # reload latency scale with the interface count.  The Byes all
+        # carry the current (pre-rename) endpoint UUID because the
+        # gather completes before the UUID is recomputed below.
+        await asyncio.gather(
+            *(self._bye_and_stop(ifstate)
+              for ifstate in self._interfaces.values())
+        )
         self._interfaces.clear()
 
         old_endpoint_uuid = self._endpoint_uuid

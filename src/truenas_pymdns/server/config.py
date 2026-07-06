@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import configparser
 import io
+import logging
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +49,8 @@ from truenas_pymdns.protocol.constants import (
     DEFAULT_CACHE_MAX_ENTRIES,
     MAX_UINT16,
 )
+
+logger = logging.getLogger(__name__)
 
 # Legacy stand-alone config path (no longer used by the production
 # daemon — kept as the parameter default for ``load_daemon_config``
@@ -185,8 +188,15 @@ def generate_daemon_config(config: DaemonConfig) -> bytes:
 
 
 def generate_service_config(service: ServiceConfig) -> bytes:
-    """Generate a service .conf file bytes from a validated ServiceConfig."""
-    cp = configparser.ConfigParser()
+    """Generate a service .conf file bytes from a validated ServiceConfig.
+
+    ``interpolation=None`` disables configparser's ``%`` handling so
+    DNS-SD TXT values (and the ``%h`` instance-name placeholder) are
+    written literally; the loader disables it symmetrically.  With
+    the default ``BasicInterpolation`` a ``%`` in any value raises on
+    ``set``.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
 
     cp.add_section("service")
     cp.set("service", "type", service.service_type)
@@ -286,24 +296,47 @@ def load_daemon_config(
 
 
 def load_service_config(path: Path) -> ServiceConfig | None:
-    """Load a single service .conf file into a validated ServiceConfig."""
-    cp = configparser.ConfigParser()
+    """Load a single service .conf file into a validated ServiceConfig.
+
+    Returns ``None`` when the file can't be turned into a valid
+    service — and logs the reason at WARNING so a malformed drop-in
+    (e.g. a middleware-rendered ``ADISK.conf``) surfaces in the log
+    instead of silently vanishing from the advertised set.
+
+    ``interpolation=None`` disables configparser's ``%`` expansion:
+    DNS-SD TXT values are opaque byte strings that may legitimately
+    contain ``%`` (URL-encoded share names, etc.) and the ``%h``
+    instance-name placeholder is resolved by the daemon, not
+    configparser — so values are taken literally.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read(str(path))
-    except configparser.Error:
+    except configparser.Error as e:
+        logger.warning("Skipping service file %s: parse error: %s", path.name, e)
         return None
 
     if not cp.has_section("service"):
+        logger.warning(
+            "Skipping service file %s: no [service] section", path.name,
+        )
         return None
 
     s = cp["service"]
     svc_type = s.get("type")
     if not svc_type:
+        logger.warning(
+            "Skipping service file %s: [service] has no 'type'", path.name,
+        )
         return None
 
     try:
         port = int(s.get("port", "0"))
     except ValueError:
+        logger.warning(
+            "Skipping service file %s: non-integer port %r",
+            path.name, s.get("port"),
+        )
         return None
 
     txt: dict[str, str] = {}
@@ -327,7 +360,10 @@ def load_service_config(path: Path) -> ServiceConfig | None:
             priority=int(s.get("priority", "0")),
             weight=int(s.get("weight", "0")),
         )
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            "Skipping service file %s: invalid field: %s", path.name, e,
+        )
         return None
 
 

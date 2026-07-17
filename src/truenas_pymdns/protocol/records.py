@@ -471,22 +471,32 @@ class MDNSRecord:
     def lexicographic_cmp(self, other: MDNSRecord) -> int:
         """Compare per RFC 6762 §8.2 for probe tiebreaking.
 
-        Returns the sign of ``self - other`` after comparing (class
-        excluding cache-flush bit, type, rdata identity).  Uses
-        ``RecordData._identity`` (case-folded per RFC 6762 §16) for
-        the rdata comparison so BCT's intentional case-flipping on
-        probe denials (guideline §820) doesn't skew the tiebreak.
-        Per RFC, the GREATER rdata wins, so callers treat a negative
-        result as "self loses" and a positive result as "self wins".
+        Returns the sign of ``self - other``: class (excluding the
+        cache-flush bit), then type, then rdata.  Per the RFC the
+        GREATER rdata wins, so a negative result means "self loses"
+        (must rename) and positive means "self wins".
+
+        rdata is compared as raw, uncompressed wire bytes taken as
+        unsigned octets (RFC 6762 §8.2, docs/specs/rfc6762.txt:1556,
+        1582).  For name-bearing rdata (PTR/SRV target) those bytes are
+        length-prefixed and case-preserving, matching Apple
+        mDNSResponder's ``CompareRData`` (mDNSCore/mDNS.c:7893); a
+        case-folded string compare orders length-differing labels wrong
+        (e.g. ``z.local`` vs ``aa.local``).
+
+        Records identical under RFC 6762 §16 case-insensitive name
+        matching are not a conflict at all (§8.2.1: "two devices …
+        advertising identical … records … no conflict"), so a
+        case-variant of the same rdata ties here instead of feeding the
+        byte comparison — this is what keeps BCT guideline §820 case
+        flips on tiebreak replies from provoking a spurious rename.
         """
         if self.key.rclass.value != other.key.rclass.value:
             return self.key.rclass.value - other.key.rclass.value
         if self.key.rtype.value != other.key.rtype.value:
             return self.key.rtype.value - other.key.rtype.value
-        our_identity = self.data._identity
-        their_identity = other.data._identity
-        if our_identity < their_identity:
-            return -1
-        if our_identity > their_identity:
-            return 1
-        return 0
+        if self.data == other.data:
+            return 0
+        ours = self.rdata_wire()
+        theirs = other.rdata_wire()
+        return (ours > theirs) - (ours < theirs)

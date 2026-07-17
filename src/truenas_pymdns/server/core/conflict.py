@@ -9,21 +9,19 @@ from truenas_pymdns.protocol.records import MDNSRecord
 def lexicographic_compare(
     ours: list[MDNSRecord], theirs: list[MDNSRecord]
 ) -> int:
-    """Compare record sets per RFC 6762 §8.2 for probe tiebreaking.
+    """Compare record sets per RFC 6762 §8.2.1 for probe tiebreaking.
 
-    Returns the sign of ``ours - theirs`` after sorting both sides by
-    ``(class, type, rdata_identity)`` and comparing element-by-element;
-    ties fall through to ``len(ours) - len(theirs)``.
+    Returns the sign of ``ours - theirs`` after sorting both sides into
+    the §8.2 lexicographical order and comparing element-by-element;
+    ties fall through to ``len(ours) - len(theirs)`` (the set that runs
+    out of records first loses, docs/specs/rfc6762.txt:1631-1638).
 
-    Uses ``RecordData._identity`` (the case-folded identity tuple
-    cached on every ``RecordData``) for sorting and for the per-
-    record rdata comparison.  This is critical for BCT conformance
-    (§820 of the Bonjour Conformance Guideline: "the case of
-    characters in names sent by the test in probe denials/conflicts
-    and queries may be modified ... the device must match mDNS names
-    case-insensitively").  A byte-wise ``rdata_wire()`` compare
-    would fail that test the moment BCT flipped case on a tiebreak
-    reply's PTR/SRV target.
+    Both the sort key and the per-record comparison use the raw,
+    uncompressed rdata wire bytes (``MDNSRecord.lexicographic_cmp``),
+    matching the §8.2 byte comparison and Apple mDNSResponder.  The
+    per-record compare still ties case-variant-identical rdata (RFC
+    6762 §16), so BCT guideline §820 case flips on tiebreak replies do
+    not provoke a rename.
 
     Callers apply the RFC: the record set with the lexicographically
     GREATER concatenation wins.  So:
@@ -33,7 +31,7 @@ def lexicographic_compare(
         < 0: ours is smaller → we lose, must rename.
     """
     def sort_key(r: MDNSRecord) -> tuple:
-        return (r.key.rclass.value, r.key.rtype.value, r.data._identity)
+        return (r.key.rclass.value, r.key.rtype.value, r.rdata_wire())
 
     sorted_ours = sorted(ours, key=sort_key)
     sorted_theirs = sorted(theirs, key=sort_key)

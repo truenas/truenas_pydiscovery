@@ -166,6 +166,41 @@ class TestBrowserRemoveEvents:
         assert any(e.event == BrowserEvent.REMOVE for e in events)
 
 
+class TestBrowserGoodbyeForUnseen:
+    """RFC 6762 §10.1: a TTL=0 goodbye is delete-only — it must never
+    be reported as a discovery.  ``_process_batch`` is exercised
+    directly (no sockets) since it only touches ``_seen`` / ``_queue``.
+    """
+
+    def test_goodbye_for_never_seen_target_emits_nothing(self):
+        async def go() -> None:
+            b = Browser("_smb._tcp")
+            b._process_batch([
+                _ptr("_smb._tcp.local", "gone._smb._tcp.local", ttl=0),
+            ])
+            # No phantom cache entry, no NEW/REMOVE event.
+            assert b._seen == {}
+            assert b._queue.qsize() == 0
+
+        asyncio.run(go())
+
+    def test_goodbye_and_readd_in_same_batch_emits_new(self):
+        """A batch carrying both a TTL=0 goodbye and a live PTR for the
+        same target is a flush-and-re-add: the live record wins."""
+        async def go() -> None:
+            b = Browser("_smb._tcp")
+            b._process_batch([
+                _ptr("_smb._tcp.local", "svc._smb._tcp.local", ttl=0),
+                _ptr("_smb._tcp.local", "svc._smb._tcp.local", ttl=4500),
+            ])
+            assert "svc._smb._tcp.local" in b._seen
+            ev = b._queue.get_nowait()
+            assert ev.event == BrowserEvent.NEW
+            assert ev.target == "svc._smb._tcp.local"
+
+        asyncio.run(go())
+
+
 class TestBrowserResolveMode:
     def test_resolve_attaches_host_port_and_addresses(self):
         async def drive() -> BrowserResult:

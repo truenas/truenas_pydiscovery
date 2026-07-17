@@ -1,6 +1,6 @@
 """Announcer per RFC 6762 s8.3 — sends ANNOUNCE_COUNT packets at
-doubling intervals (1s, 2s) with the cache-flush bit set on every
-record.
+doubling intervals (1s, 2s), each record carrying its own cache-flush
+bit (set on unique records, clear on shared DNS-SD PTRs per §10.2).
 """
 from __future__ import annotations
 
@@ -52,25 +52,27 @@ class TestAnnounceSendsCountPackets:
 
 
 class TestAnnouncementContent:
-    def test_every_emitted_record_has_cache_flush_set(self):
-        """RFC 6762 s10.2: announcement records MUST have the
-        cache-flush bit so peers replace their stale cached copies.
-        Announcer must set it even if the source record didn't."""
+    def test_each_record_announced_with_its_own_cache_flush_bit(self):
+        """RFC 6762 §10.2 (docs/specs/rfc6762.txt:1919-1954): the
+        cache-flush bit MUST be set on unique records and MUST NOT be
+        set on shared records.  The Announcer sends each record with
+        the bit it was registered with — it must not force it on (which
+        would flush neighbours' other instances of a shared type)."""
         sent: list[MDNSMessage] = []
         a = Announcer(sent.append)
-        src = _a("plain.local", "10.0.0.1", cache_flush=False)
+        shared = _a("shared.local", "10.0.0.1", cache_flush=False)
+        unique = _a("unique.local", "10.0.0.2", cache_flush=True)
 
-        _run(a.announce([src]))
+        _run(a.announce([shared, unique]))
 
         assert sent
         for msg in sent:
-            assert msg.answers
-            for rr in msg.answers:
-                assert rr.cache_flush is True
+            flags = {rr.key.name: rr.cache_flush for rr in msg.answers}
+            assert flags["shared.local"] is False
+            assert flags["unique.local"] is True
 
     def test_source_record_not_mutated(self):
-        """Announcer builds new records with cache_flush=True rather
-        than mutating the caller's record."""
+        """The Announcer does not mutate the caller's records."""
         sent: list[MDNSMessage] = []
         a = Announcer(sent.append)
         src = _a("plain.local", "10.0.0.1", cache_flush=False)

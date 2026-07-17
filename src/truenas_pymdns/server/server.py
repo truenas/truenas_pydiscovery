@@ -118,6 +118,12 @@ class MDNSServer(ConfigDaemon):
         # multiple flaps into a single re-probe).
         self._last_link_up: dict[int, float] = {}
         self._pending_link_ups: dict[int, asyncio.Task] = {}
+        # In-flight announcement tasks per registered group (keyed by
+        # id(group)).  Lets the reload paths cancel a specific group's
+        # ~7 s announce sequence before goodbye + re-register, so a
+        # straggler tick can't re-multicast old-name records after the
+        # goodbye that withdrew them (RFC 6762 §8.4 / §10.1).
+        self._announce_tasks: dict[int, list[asyncio.Task]] = {}
 
     async def _start(self, loop: asyncio.AbstractEventLoop) -> None:
         logger.info(
@@ -270,7 +276,7 @@ class MDNSServer(ConfigDaemon):
                     )
         else:
             if ifstate.responder:
-                ifstate.responder.suppress_if_answered(message)
+                ifstate.responder.suppress_if_answered(message, ifindex)
             if ifstate.prober:
                 ifstate.prober.handle_incoming(message, source)
 
@@ -376,9 +382,39 @@ class MDNSServer(ConfigDaemon):
                     and ifstate.iface.index not in group.interfaces):
                 continue
             if ifstate.announcer:
-                ifstate.announcer.schedule_announce(
+                task = ifstate.announcer.schedule_announce(
                     group.records, count=announce_count,
                 )
+                self._track_announce(group, task)
+
+    def _track_announce(
+        self, group: EntryGroup, task: asyncio.Task,
+    ) -> None:
+        """Record *task* as an in-flight announce for *group* so a
+        reload can cancel just this group's stragglers."""
+        gid = id(group)
+        self._announce_tasks.setdefault(gid, []).append(task)
+        task.add_done_callback(
+            lambda t: self._untrack_announce(gid, t)
+        )
+
+    def _untrack_announce(self, gid: int, task: asyncio.Task) -> None:
+        tasks = self._announce_tasks.get(gid)
+        if tasks and task in tasks:
+            tasks.remove(task)
+            if not tasks:
+                self._announce_tasks.pop(gid, None)
+
+    def _cancel_group_announces(self, group: EntryGroup) -> None:
+        """Cancel every in-flight announce task for *group*.
+
+        Used by the service-delta reload before goodbyeing a removed
+        service: a blanket ``announcer.cancel_all()`` would also
+        truncate the announce sequences of the services being kept,
+        since one per-interface Announcer batches every group's tasks.
+        """
+        for task in self._announce_tasks.pop(id(group), []):
+            task.cancel()
 
     def _on_conflict(self, records: list[MDNSRecord]) -> None:
         """RFC 6762 s9: on conflict, rename and re-probe."""
@@ -701,6 +737,9 @@ class MDNSServer(ConfigDaemon):
         for ifstate in self._interfaces.values():
             await ifstate.stop()
         self._interfaces.clear()
+        # ifstate.stop() already cancelled every announcer task; drop
+        # the now-dangling per-group handles so they don't linger.
+        self._announce_tasks.clear()
 
         for group in self._entry_groups:
             self._registry.remove_group(group)
@@ -737,6 +776,22 @@ class MDNSServer(ConfigDaemon):
         for task in self._conflict_tasks:
             task.cancel()
         self._conflict_tasks.clear()
+
+        # RFC 6762 §8.4 / §10.1: every group is about to goodbye and
+        # re-register under the new name, so cancel all in-flight
+        # announce/probe/response tasks first.  Otherwise a straggler
+        # from the pre-rename announce sequence (which captured the
+        # old-name records) would re-multicast them with a live TTL
+        # right after the goodbye that withdrew them.  A blanket cancel
+        # is safe here precisely because everything re-registers.
+        for ifstate in self._interfaces.values():
+            if ifstate.announcer is not None:
+                ifstate.announcer.cancel_all()
+            if ifstate.prober is not None:
+                ifstate.prober.cancel_all()
+            if ifstate.responder is not None:
+                ifstate.responder.cancel_all()
+        self._announce_tasks.clear()
 
         for ifstate in self._interfaces.values():
             owned = self._registry.get_all_records(ifstate.iface.index)
@@ -836,6 +891,11 @@ class MDNSServer(ConfigDaemon):
             group = self._service_groups.pop(key)
             if group in self._entry_groups:
                 self._entry_groups.remove(group)
+            # Cancel this group's in-flight announce sequence before we
+            # goodbye it, so a straggler tick can't re-multicast the
+            # records we're about to withdraw (RFC 6762 §10.1).  Scoped
+            # to this group so kept services keep announcing.
+            self._cancel_group_announces(group)
             # RFC 6762 §10.1 goodbye is a TTL=0 assertion that a
             # record is being withdrawn.  The DNS-SD meta-PTR
             # ``_services._dns-sd._udp.<domain>`` → ``<type>.<domain>``
@@ -1027,7 +1087,7 @@ def _rename_group(group: EntryGroup) -> tuple[str | None, str | None]:
             key=new_key, ttl=old_rec.ttl, data=new_data,
             cache_flush=old_rec.cache_flush,
         )
-        ow.last_multicast = 0.0
-        ow.last_peer_answer = 0.0
+        ow.last_multicast = {}
+        ow.last_peer_answer = {}
 
     return (primary, new_primary)

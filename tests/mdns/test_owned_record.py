@@ -22,6 +22,10 @@ from truenas_pymdns.server.core.entry_group import EntryGroup, OwnedRecord
 from truenas_pymdns.server.query.responder import Responder
 from truenas_pymdns.server.service.registry import ServiceRegistry
 
+# Arbitrary interface index used to key the per-interface scheduling
+# state (last_multicast / last_peer_answer are dict[int, float]).
+IFACE = 1
+
 
 def _a(name: str, addr: str) -> MDNSRecord:
     return MDNSRecord(
@@ -57,10 +61,10 @@ def _addr(ow: OwnedRecord) -> str:
 
 
 class TestOwnedRecordShape:
-    def test_defaults_zero(self):
+    def test_defaults_empty(self):
         ow = OwnedRecord(_a("h.local", "10.0.0.1"))
-        assert ow.last_multicast == 0.0
-        assert ow.last_peer_answer == 0.0
+        assert ow.last_multicast == {}
+        assert ow.last_peer_answer == {}
 
     def test_entry_group_wraps_on_add(self):
         group = EntryGroup()
@@ -69,7 +73,7 @@ class TestOwnedRecordShape:
         owned = group.owned_records
         assert len(owned) == 1
         assert owned[0].record is rec
-        assert owned[0].last_multicast == 0.0
+        assert owned[0].last_multicast == {}
 
     def test_entry_group_records_property_unwraps(self):
         group = EntryGroup()
@@ -88,13 +92,13 @@ class TestSuppressIfAnsweredPerRdata:
 
         peer = MDNSMessage()
         peer.answers = [_a("multi.local", "10.0.0.1")]
-        resp.suppress_if_answered(peer)
+        resp.suppress_if_answered(peer, IFACE)
 
         owned = reg.lookup("multi.local", QType.A)
         by_ip = {_addr(ow): ow for ow in owned}
 
-        assert by_ip["10.0.0.1"].last_peer_answer > 0.0
-        assert by_ip["10.0.0.2"].last_peer_answer == 0.0
+        assert by_ip["10.0.0.1"].last_peer_answer.get(IFACE, 0.0) > 0.0
+        assert by_ip["10.0.0.2"].last_peer_answer == {}
 
     def test_peer_answer_for_unowned_name_is_dropped(self):
         reg = _registry_with(_a("ours.local", "10.0.0.1"))
@@ -103,10 +107,10 @@ class TestSuppressIfAnsweredPerRdata:
         peer = MDNSMessage()
         peer.answers = [_a("theirs.local", "10.0.0.9")]
         # Must not raise; nothing to stamp.
-        resp.suppress_if_answered(peer)
+        resp.suppress_if_answered(peer, IFACE)
 
         owned = reg.lookup("ours.local", QType.A)
-        assert owned[0].last_peer_answer == 0.0
+        assert owned[0].last_peer_answer == {}
 
 
 class TestScheduleRateLimit:
@@ -117,9 +121,9 @@ class TestScheduleRateLimit:
         resp = _responder(reg)
 
         ow = reg.lookup("h.local", QType.A)[0]
-        ow.last_multicast = time.monotonic()
+        ow.last_multicast = {IFACE: time.monotonic()}
 
-        resp._schedule_response([ow])
+        resp._schedule_response([ow], IFACE)
         assert not resp._pending
 
     def test_same_key_different_rdata_schedule_independently(self):
@@ -135,10 +139,10 @@ class TestScheduleRateLimit:
         ow1 = next(ow for ow in owned if _addr(ow) == "10.0.0.1")
         ow2 = next(ow for ow in owned if _addr(ow) == "10.0.0.2")
 
-        ow1.last_multicast = time.monotonic()
+        ow1.last_multicast = {IFACE: time.monotonic()}
 
-        resp._schedule_response([ow1, ow2])
+        resp._schedule_response([ow1, ow2], IFACE)
         assert resp._pending
 
-        (only_owned, _, _) = next(iter(resp._pending.values()))
+        (only_owned, _, _, _) = next(iter(resp._pending.values()))
         assert only_owned == [ow2]

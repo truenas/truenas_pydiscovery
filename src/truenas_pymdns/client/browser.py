@@ -163,16 +163,25 @@ class Browser:
     def _process_batch(self, records: list[MDNSRecord]) -> None:
         targets = extract_ptr_targets(records, self._browse_name)
         for target in targets:
-            # Detect goodbye (TTL=0) PTRs for known targets.
+            # RFC 6762 §10.1 (docs/specs/rfc6762.txt:1842-1867): a TTL=0
+            # PTR is a goodbye — a deletion, never a discovery.  Emit
+            # REMOVE only for a target we had; a goodbye for a target we
+            # never saw is ignored (both avahi and mDNSResponder treat
+            # TTL=0 as delete-only and never synthesise an add).  A batch
+            # that carries BOTH a goodbye and a live (TTL>0) PTR for the
+            # same target is a flush-and-re-add — the live record wins,
+            # so we only take the goodbye branch when there is no
+            # positive PTR for the target.
             goodbye = self._is_goodbye_for(target, records)
-            if goodbye and target in self._seen:
-                prior = self._seen.pop(target)
-                removed = BrowserResult(
-                    event=BrowserEvent.REMOVE,
-                    target=target,
-                    instance=prior.instance,
-                )
-                self._queue.put_nowait(removed)
+            positive = self._has_positive_for(target, records)
+            if goodbye and not positive:
+                if target in self._seen:
+                    prior = self._seen.pop(target)
+                    self._queue.put_nowait(BrowserResult(
+                        event=BrowserEvent.REMOVE,
+                        target=target,
+                        instance=prior.instance,
+                    ))
                 continue
 
             if target in self._seen:
@@ -214,6 +223,20 @@ class Browser:
                     and isinstance(rr.data, PTRRecordData)
                     and rr.data.target.lower() == target_lower
                     and rr.ttl == 0):
+                return True
+        return False
+
+    def _has_positive_for(
+        self, target: str, records: list[MDNSRecord],
+    ) -> bool:
+        """True if *records* carries a live (TTL>0) PTR for *target*."""
+        target_lower = target.lower()
+        for rr in records:
+            if (rr.key.name == self._browse_name.lower()
+                    and rr.key.rtype == QType.PTR
+                    and isinstance(rr.data, PTRRecordData)
+                    and rr.data.target.lower() == target_lower
+                    and rr.ttl > 0):
                 return True
         return False
 

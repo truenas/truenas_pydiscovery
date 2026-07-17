@@ -30,6 +30,7 @@ from truenas_pymdns.server.query.responder import Responder
 from truenas_pymdns.server.service.registry import ServiceRegistry
 
 _ANSWER_HISTORY_WINDOW = 0.500  # mirrors responder._ANSWER_HISTORY_WINDOW
+IFACE = 1  # interface index keying the per-interface scheduling state
 
 
 def _a(name: str, addr: str) -> MDNSRecord:
@@ -73,14 +74,14 @@ class TestSuppressCancelsPendingBatch:
             query = MDNSMessage(
                 questions=[MDNSQuestion("h.local", QType.A)],
             )
-            resp.handle_query(query, ("10.0.0.50", 5353), interface_index=1)
+            resp.handle_query(query, ("10.0.0.50", 5353), interface_index=IFACE)
             assert resp._pending, "scheduling path must populate _pending"
-            (_, _, handle), = resp._pending.values()
+            (_, _, handle, _), = resp._pending.values()
 
             # Peer answers the same rdata — should cancel the timer.
             peer = MDNSMessage()
             peer.answers = [_a("h.local", "10.0.0.1")]
-            resp.suppress_if_answered(peer)
+            resp.suppress_if_answered(peer, IFACE)
 
             assert resp._pending == {}
             assert handle.cancelled()
@@ -103,18 +104,18 @@ class TestSuppressCancelsPendingBatch:
             # Seed _pending directly via _schedule_response so both
             # OwnedRecords end up in a single batch.
             owned = reg.lookup("h.local", QType.A)
-            resp._schedule_response(list(owned))
+            resp._schedule_response(list(owned), IFACE)
             assert len(resp._pending) == 1
-            (pkey, (before, _, handle)), = resp._pending.items()
+            (pkey, (before, _, handle, _)), = resp._pending.items()
             assert len(before) == 2
 
             # Peer answers only 10.0.0.1.
             peer = MDNSMessage()
             peer.answers = [_a("h.local", "10.0.0.1")]
-            resp.suppress_if_answered(peer)
+            resp.suppress_if_answered(peer, IFACE)
 
             assert pkey in resp._pending
-            after, _, _ = resp._pending[pkey]
+            after, _, _, _ = resp._pending[pkey]
             assert len(after) == 1
             remaining_addr = after[0].record.data
             assert isinstance(remaining_addr, ARecordData)
@@ -135,10 +136,10 @@ class TestSuppressCancelsPendingBatch:
             assert resp._pending == {}
             peer = MDNSMessage()
             peer.answers = [_a("h.local", "10.0.0.1")]
-            resp.suppress_if_answered(peer)
+            resp.suppress_if_answered(peer, IFACE)
 
             ow = reg.lookup("h.local", QType.A)[0]
-            assert ow.last_peer_answer > 0.0
+            assert ow.last_peer_answer.get(IFACE, 0.0) > 0.0
             assert resp._pending == {}
             assert sent == []
         finally:
@@ -155,9 +156,9 @@ class TestPeerAnswerWindowBlocksScheduling:
         resp, loop = _responder_on_loop(reg, sent)
         try:
             ow = reg.lookup("h.local", QType.A)[0]
-            ow.last_peer_answer = time.monotonic()
+            ow.last_peer_answer = {IFACE: time.monotonic()}
 
-            resp._schedule_response([ow])
+            resp._schedule_response([ow], IFACE)
             assert resp._pending == {}
         finally:
             resp.cancel_all()
@@ -171,13 +172,15 @@ class TestPeerAnswerWindowBlocksScheduling:
         resp, loop = _responder_on_loop(reg, sent)
         try:
             ow = reg.lookup("h.local", QType.A)[0]
-            ow.last_peer_answer = (
-                time.monotonic() - _ANSWER_HISTORY_WINDOW - 0.050
-            )
+            ow.last_peer_answer = {
+                IFACE: time.monotonic() - _ANSWER_HISTORY_WINDOW - 0.050
+            }
             # Ensure rate-limit gate is also clear.
-            ow.last_multicast = time.monotonic() - MULTICAST_RATE_LIMIT - 0.050
+            ow.last_multicast = {
+                IFACE: time.monotonic() - MULTICAST_RATE_LIMIT - 0.050
+            }
 
-            resp._schedule_response([ow])
+            resp._schedule_response([ow], IFACE)
             assert len(resp._pending) == 1
         finally:
             resp.cancel_all()

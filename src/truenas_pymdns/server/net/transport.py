@@ -38,8 +38,8 @@ class MDNSTransport:
 
     Uses ``loop.add_reader()`` with ``sock.recvmsg()`` instead of
     ``create_datagram_endpoint()`` because we need ancillary data
-    (IP_RECVTTL / IPV6_RECVHOPLIMIT) for TTL==255 validation
-    per RFC 6762 Section 11.
+    (IP_TTL / IPV6_HOPLIMIT) to drop off-link responses whose TTL is
+    not 255 (RFC 6762 §11 anti-spoofing, applied to responses only).
     """
 
     def __init__(
@@ -189,35 +189,37 @@ class MDNSTransport:
         except (OSError, BlockingIOError):
             return
 
-        # RFC 6762 s11: validate TTL == 255 from ancillary data
-        ttl = self._extract_ttl(ancdata, family)
-        if ttl is None:
-            logger.debug(
-                "No TTL in ancillary data from %s — cannot validate",
-                addr,
-            )
-        elif ttl != MDNS_TTL:
-            logger.debug(
-                "Dropping packet with TTL %d from %s (expected 255)",
-                ttl, addr,
-            )
-            return
-
         try:
             message = MDNSMessage.from_wire(data)
         except (ValueError, IndexError) as e:
             logger.debug("Failed to parse mDNS packet from %s: %s", addr, e)
             return
 
-        # RFC 6762 s6: responses MUST have source port 5353.
-        # Non-5353 source port on a query = legacy unicast query (s6.7).
         source_port = addr[1]
-        if message.is_response and source_port != MDNS_PORT:
-            logger.debug(
-                "Dropping response from non-5353 port %d (%s)",
-                source_port, addr,
-            )
-            return
+        if message.is_response:
+            # RFC 6762 s6: responses MUST originate from port 5353; a
+            # non-5353 source port marks a legacy unicast query (s6.7),
+            # so a "response" from such a port is malformed.
+            if source_port != MDNS_PORT:
+                logger.debug(
+                    "Dropping response from non-5353 port %d (%s)",
+                    source_port, addr,
+                )
+                return
+            # RFC 6762 §11 (docs/specs/rfc6762.txt:2108-2125): mDNS
+            # responses are sent with IP TTL 255; one arriving with a
+            # lower TTL crossed a router and is off-link, so drop it as
+            # an anti-spoofing guard.  Scoped to responses (mirrors
+            # avahi's check_response_ttl) — §11 mandates an address
+            # check, not a TTL drop — and a missing TTL cmsg is treated
+            # as valid, matching avahi and mDNSResponder.
+            ttl = self._extract_ttl(ancdata, family)
+            if ttl is not None and ttl != MDNS_TTL:
+                logger.debug(
+                    "Dropping off-link response (TTL %d != 255) from %s",
+                    ttl, addr,
+                )
+                return
 
         if self._handler:
             self._handler(message, addr, self._ifindex)
@@ -229,8 +231,14 @@ class MDNSTransport:
         """Extract the TTL/hop-limit from ancillary data."""
         for cmsg_level, cmsg_type, cmsg_data in ancdata:
             if family == socket.AF_INET:
-                # Linux: IPPROTO_IP, IP_RECVTTL (12), 4-byte int
-                if cmsg_level == socket.IPPROTO_IP and cmsg_type == IP_RECVTTL:
+                # Linux delivers the *received* TTL in an IP_TTL (2)
+                # cmsg; IP_RECVTTL (12) is only the setsockopt enable
+                # option, never the cmsg_type of a delivered value.
+                # Accept either — avahi (avahi-core/socket.c:726-733)
+                # and mDNSResponder (mDNSPosix/mDNSUNP.c) both do.
+                if cmsg_level == socket.IPPROTO_IP and cmsg_type in (
+                    socket.IP_TTL, IP_RECVTTL,
+                ):
                     if len(cmsg_data) >= 4:
                         return struct.unpack("=i", cmsg_data[:4])[0]
                     elif len(cmsg_data) >= 1:

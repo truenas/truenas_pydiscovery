@@ -19,16 +19,34 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from ipaddress import IPv4Address
 from pathlib import Path
 
+from truenas_pymdns.protocol.constants import ANNOUNCE_INTERVAL_INITIAL, QType
+from truenas_pymdns.protocol.records import (
+    ARecordData,
+    MDNSRecord,
+    MDNSRecordKey,
+)
 from truenas_pymdns.server.config import (
     DaemonConfig,
     ServerConfig,
     ServiceConfig,
     generate_service_config,
 )
+from truenas_pymdns.server.core.announcer import Announcer
+from truenas_pymdns.server.core.entry_group import EntryGroup
 from truenas_pymdns.server.server import MDNSServer
 from truenas_pymdns.server.service.file_loader import ServiceKey
+
+
+def _a(name: str, addr: str) -> MDNSRecord:
+    return MDNSRecord(
+        key=MDNSRecordKey(name, QType.A),
+        ttl=120,
+        data=ARecordData(IPv4Address(addr)),
+        cache_flush=True,
+    )
 
 
 def _write_svc(
@@ -376,3 +394,57 @@ class TestReloadDispatch:
         # ServiceKey).
         for group in server._service_groups.values():
             assert group in server._entry_groups
+
+
+class TestAnnounceCancellation:
+    """RFC 6762 §8.4/§10.1: a reused interface's in-flight announce
+    must be cancellable per-group before goodbye + re-register, so a
+    straggler tick can't re-multicast records that were just withdrawn.
+    Real Announcer + real asyncio tasks, no mocks.
+    """
+
+    def test_cancel_group_announces_stops_straggler(self, tmp_path):
+        server = _make_server(tmp_path)
+        group = EntryGroup()
+        group.add_record(_a("stragg.local", "10.0.0.1"))
+
+        async def go() -> None:
+            sent: list[object] = []
+            ann = Announcer(sent.append)
+            task = ann.schedule_announce(group.records)
+            server._track_announce(group, task)
+            await asyncio.sleep(0.05)   # first announce fires immediately
+            assert len(sent) == 1
+            server._cancel_group_announces(group)
+            await asyncio.sleep(ANNOUNCE_INTERVAL_INITIAL + 0.2)
+            # No second (straggler) announce after the cancel.
+            assert len(sent) == 1
+            await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(go())
+
+    def test_cancel_is_scoped_to_one_group(self, tmp_path):
+        server = _make_server(tmp_path)
+        g1 = EntryGroup()
+        g1.add_record(_a("g1.local", "10.0.0.1"))
+        g2 = EntryGroup()
+        g2.add_record(_a("g2.local", "10.0.0.2"))
+
+        async def go() -> None:
+            ann = Announcer(lambda m: None)
+            t1 = ann.schedule_announce(g1.records)
+            t2 = ann.schedule_announce(g2.records)
+            server._track_announce(g1, t1)
+            server._track_announce(g2, t2)
+            server._cancel_group_announces(g1)
+            # Let t1's cancellation fully settle before asserting.
+            try:
+                await t1
+            except asyncio.CancelledError:
+                pass
+            assert t1.cancelled()
+            assert not t2.cancelled(), "kept group's announce survives"
+            t2.cancel()
+            await asyncio.gather(t2, return_exceptions=True)
+
+        asyncio.run(go())

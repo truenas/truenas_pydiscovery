@@ -1,7 +1,7 @@
 """Atomic service registration with entry group state machine."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Callable
 
@@ -32,12 +32,22 @@ class OwnedRecord:
     lifecycle naturally instead of living in a side dict keyed by
     name|rtype.
 
+    ``last_multicast`` / ``last_peer_answer`` map an interface index to
+    the monotonic time this record was last multicast / last seen
+    answered by a peer ON THAT INTERFACE.  Both the §6 1-second
+    multicast rate limit and §7.4 duplicate-answer suppression are
+    per-interface ("... on that particular interface",
+    docs/specs/rfc6762.txt:854-857); one ServiceRegistry shares these
+    OwnedRecord objects across every per-interface Responder, so the
+    timestamps MUST be keyed by interface or one link's traffic would
+    rate-limit or suppress another's.
+
     Analogous to mDNSResponder's AuthRecord.LastMCTime /
-    LastMCInterface fields (mDNSCore/mDNS.c).
+    LastMCInterface pair (mDNSCore/mDNS.c:8527).
     """
     record: MDNSRecord
-    last_multicast: float = 0.0
-    last_peer_answer: float = 0.0
+    last_multicast: dict[int, float] = field(default_factory=dict)
+    last_peer_answer: dict[int, float] = field(default_factory=dict)
 
 
 class EntryGroup:

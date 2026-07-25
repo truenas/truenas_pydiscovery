@@ -79,15 +79,20 @@ class TestBasicProbe:
         p = _prober()
         assert _run(p.probe([])) is True
 
-    def test_exceeds_max_restarts_returns_false_without_sending(self):
-        """Once ``_probe_restart_count`` has hit the cap, ``probe``
-        short-circuits and no packets go on the wire."""
-        sent: list[MDNSMessage] = []
-        p = _prober(sent)
-        p._probe_restart_count = 20  # MAX_PROBE_RESTARTS
+    def test_sequential_probes_keep_succeeding(self):
+        """A reused Prober has no cumulative giveup cap: it keeps
+        probing successfully across repeated registrations / re-probes.
+        Neither avahi nor mDNSResponder permanently disables probing
+        for an interface, so neither do we."""
+        p = _prober()
 
-        assert _run(p.probe([_a("h.local", "10.0.0.1")])) is False
-        assert sent == []
+        async def run() -> list[bool]:
+            return [
+                await p.probe([_a(f"seq{i}.local", "10.0.0.1")])
+                for i in range(4)
+            ]
+
+        assert _run(run(), timeout=8.0) == [True, True, True, True]
 
 
 class TestProbeCycleSendsThreePackets:

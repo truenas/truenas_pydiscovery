@@ -11,7 +11,7 @@ from truenas_pydiscovery_utils.status import StatusWriter
 from .config import DaemonConfig, ServiceConfig, get_hostname
 from .core.announcer import Announcer
 from .core.conflict import generate_alternative_name
-from .core.entry_group import EntryGroup
+from .core.entry_group import EntryGroup, OwnedRecord
 from .core.goodbye import send_goodbye
 from .core.prober import Prober
 from truenas_pymdns.protocol.constants import (
@@ -21,6 +21,7 @@ from truenas_pymdns.protocol.constants import (
     LINK_FLAP_PROBE_DELAY,
     LINK_FLAP_WINDOW,
     LINK_NORMAL_PROBE_DELAY,
+    MAX_PROBE_RESTARTS,
     QType,
 )
 from truenas_pymdns.protocol.message import MDNSMessage
@@ -63,6 +64,7 @@ class PerInterfaceState:
             ),
             use_ipv4=config.server.use_ipv4,
             use_ipv6=config.server.use_ipv6,
+            disallow_other_stacks=config.server.disallow_other_stacks,
         )
         self.responder: Responder | None = None
         self.prober: Prober | None = None
@@ -94,7 +96,13 @@ class MDNSServer(ConfigDaemon):
         # scaffolding ``_reload`` diffs against).
         super().__init__(logger, config)
         self._hostname = get_hostname(config.server)
-        self._fqdn = f"{self._hostname}.{config.server.domain_name}"
+        # The name config is read once, here.  host-name/domain-name
+        # are fixed for the life of the process (see ``_reload``), so
+        # the domain is snapshotted rather than re-read from the
+        # live, SIGHUP-swapped ``_config`` — a §9 conflict rename
+        # must not pick up a config edit the reload path refused.
+        self._domain = config.server.domain_name
+        self._fqdn = f"{self._hostname}.{self._domain}"
         self._interfaces: dict[int, PerInterfaceState] = {}
         self._registry = ServiceRegistry()
         self._entry_groups: list[EntryGroup] = []
@@ -103,14 +111,44 @@ class MDNSServer(ConfigDaemon):
         # delta-reload path so services.d edits can add or remove
         # individual services without goodbyeing the whole registry.
         # Kept in lock-step with the subset of ``_entry_groups`` that
-        # came from services.d; the host-addresses group lives only
-        # in ``_entry_groups``.
+        # came from services.d.
         self._service_groups: dict[ServiceKey, EntryGroup] = {}
+        # The host-address groups, one per interface (see
+        # ``_register_host_addresses``).  Tracked separately from the
+        # services.d groups because a host name conflict on any one
+        # interface has to rename the host on all of them
+        # (RFC 6762 §14).
+        self._host_groups: list[EntryGroup] = []
         self._status = StatusWriter(config.rundir, logger)
         self._wake = asyncio.Event()
         # Tracks in-flight conflict-resolution tasks spawned by
         # _on_conflict() so they can be cancelled on shutdown.
         self._conflict_tasks: list[asyncio.Task] = []
+        # True while a §9 host rename is re-registering the whole
+        # registry.  A conflict raised against the half-published
+        # records is dropped rather than queued: renaming again from
+        # inside the rebuild would re-enter ``_reregister_all`` and
+        # cancel the rebuild partway through.  Convergence comes from
+        # the rename loop in ``_rename_host_after_conflict`` instead,
+        # which re-checks the host groups after every rebuild and
+        # renames again while any is still in COLLISION.
+        self._rehoming = False
+        # Restart budget for the §9 host rename, mirroring Apple's
+        # persistent per-record ``ProbeRestartCount``: it survives
+        # across ``_rename_host_after_conflict`` calls because the
+        # losing probe of a capped run queues one more conflict task,
+        # which must not restart the loop with a fresh budget.  Reset
+        # on convergence and by ``_full_rebuild_reload``.
+        self._rename_restarts = 0
+        # Serializes the whole-registry mutation paths — full
+        # rebuild, service delta, and the §9 rename's re-register —
+        # against each other.  Each of them awaits while
+        # ``_entry_groups`` / ``_service_groups`` / the registry are
+        # mid-transition, and an interleaved peer would append to or
+        # clear collections the other is still walking.  Created
+        # lazily per running loop by ``_get_rebuild_lock``.
+        self._rebuild_lock: asyncio.Lock | None = None
+        self._rebuild_lock_loop: asyncio.AbstractEventLoop | None = None
         self._link_monitor: LinkMonitor | None = None
         # Flap-detection state per ifindex (mDNS.c:14262-14273):
         # time of most recent re-probe-triggering link-up and the
@@ -126,10 +164,7 @@ class MDNSServer(ConfigDaemon):
         self._announce_tasks: dict[int, list[asyncio.Task]] = {}
 
     async def _start(self, loop: asyncio.AbstractEventLoop) -> None:
-        logger.info(
-            "Starting mDNS daemon: %s.%s",
-            self._hostname, self._config.server.domain_name,
-        )
+        logger.info("Starting mDNS daemon: %s", self._fqdn)
 
         if not self._config.server.interfaces:
             logger.error("No interfaces configured — refusing to start")
@@ -146,7 +181,10 @@ class MDNSServer(ConfigDaemon):
         self._register_host_addresses()
 
         # Probe and announce
-        for group in self._entry_groups:
+        # Snapshot: a probe conflict raised mid-loop schedules
+        # ``_resolve_conflict``, and a host-name conflict there
+        # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
+        for group in list(self._entry_groups):
             await self._probe_and_announce(group)
 
         # RFC 6762 §8.3 / §13 + BCT II.17 "HOT-PLUGGING": listen for
@@ -323,11 +361,35 @@ class MDNSServer(ConfigDaemon):
     def _register_host_addresses(self) -> None:
         """Create A/AAAA records from discovered interface addresses.
 
+        One entry group per interface, each bound to that interface via
+        ``EntryGroup.interfaces``, holding only the addresses that
+        interface actually has.  RFC 6762 §6.2 requires a responder to
+        "include all addresses that are valid on the interface on which
+        it is sending the message, and MUST NOT include addresses that
+        are not valid on that interface (such as addresses that may be
+        configured on the host's other interfaces)", restated as a
+        MUST for multihomed hosts in §14.
+
+        Binding at the group level is what makes that hold everywhere:
+        ``ServiceRegistry.lookup`` already filters by
+        ``group.interfaces``, so direct answers, the SRV additionals a
+        DNS-SD browse pulls in, probes, announcements and goodbyes all
+        inherit the scoping from this one assignment.
+
+        Avahi models it the same way — one entry group per address,
+        registered against ``a->interface->hardware->index``
+        (``avahi_interface_address_update_rrs`` in
+        avahi-core/iface.c:45) — as does mDNSResponder, whose
+        address record hangs off the per-interface
+        ``NetworkInterfaceInfo`` and is stamped with its
+        ``InterfaceID`` (``AdvertiseInterface`` in mDNSCore/mDNS.c).
+
         Only registers addresses for address families where the
         transport is actually active.
         """
-        group = EntryGroup()
+        self._host_groups.clear()
         for ifstate in self._interfaces.values():
+            group = EntryGroup()
             if ifstate.transport.has_ipv4:
                 for v4 in ifstate.iface.addrs_v4:
                     group.add_address(self._fqdn, str(v4))
@@ -336,8 +398,11 @@ class MDNSServer(ConfigDaemon):
                     if v6.is_link_local:
                         continue
                     group.add_address(self._fqdn, str(v6))
-        if group.records:
+            if not group.records:
+                continue
+            group.interfaces = [ifstate.iface.index]
             self._entry_groups.append(group)
+            self._host_groups.append(group)
 
     async def _probe_and_announce(
         self, group: EntryGroup,
@@ -351,6 +416,14 @@ class MDNSServer(ConfigDaemon):
         (matches Apple mDNSResponder's flap handling at
         ``mDNSCore/mDNS.c:14262-14273``).
         """
+        if group not in self._entry_groups:
+            # A concurrent re-registration discarded this group — the
+            # §9 host rename rebuilds every group under the new name
+            # while a startup or reload loop may still be walking a
+            # snapshot of the old ones.  Probing it now would put the
+            # name we just conceded back on the wire.
+            return
+
         unique = group.get_unique_records()
         if not unique:
             group.set_state(EntryGroupState.ESTABLISHED)
@@ -405,16 +478,23 @@ class MDNSServer(ConfigDaemon):
             if not tasks:
                 self._announce_tasks.pop(gid, None)
 
-    def _cancel_group_announces(self, group: EntryGroup) -> None:
+    def _cancel_group_announces(self, group: EntryGroup) -> bool:
         """Cancel every in-flight announce task for *group*.
 
         Used by the service-delta reload before goodbyeing a removed
         service: a blanket ``announcer.cancel_all()`` would also
         truncate the announce sequences of the services being kept,
         since one per-interface Announcer batches every group's tasks.
+
+        Returns True if any task was still in flight — meaning a
+        snapshot of the group's records may already be partially
+        multicast, and a caller that just withdrew a record can
+        re-announce the survivors.
         """
-        for task in self._announce_tasks.pop(id(group), []):
+        tasks = self._announce_tasks.pop(id(group), [])
+        for task in tasks:
             task.cancel()
+        return bool(tasks)
 
     def _on_conflict(self, records: list[MDNSRecord]) -> None:
         """RFC 6762 s9: on conflict, rename and re-probe."""
@@ -427,11 +507,20 @@ class MDNSServer(ConfigDaemon):
         )
 
     async def _resolve_conflict(self, records: list[MDNSRecord]) -> None:
-        """RFC 6762 §9: pick an alternative name, rewrite every record
-        in the colliding group to use it, then re-probe."""
+        """RFC 6762 §9: give up the contested name and re-register.
+
+        A service-instance collision is local to its group — rename
+        that group's records and re-probe.  A *host name* collision is
+        not: the host FQDN is also every service's SRV target, so it
+        has to move everywhere at once.  ``_rename_host_after_conflict``
+        handles that case.
+        """
         for group in self._entry_groups:
             if group.state != EntryGroupState.COLLISION:
                 continue
+            if group in self._host_groups:
+                await self._rename_host_after_conflict()
+                return
             # Snapshot every record reference BEFORE rename.  The
             # MDNSRecord objects are not mutated by ``_rename_group``;
             # it rebinds ``ow.record`` to a new instance, so these
@@ -467,6 +556,129 @@ class MDNSServer(ConfigDaemon):
             group.set_state(EntryGroupState.REGISTERING)
             await self._probe_and_announce(group)
             break
+
+    async def _rename_host_after_conflict(self) -> None:
+        """RFC 6762 §9: we lost the probe for our own host name.
+
+        §9 says the loser "MUST cease using the name, and reconfigure".
+        Ceasing means more than moving the A/AAAA records.  The host
+        FQDN is also every service's SRV target and, for
+        ``instance_name = %h``, part of the instance name — so the
+        whole registry has to come back under the new name.  Leaving
+        SRV targets on the old name is worse than a failed lookup: that
+        name now belongs to the host that just won it, so clients
+        following the SRV would resolve it and connect to the wrong
+        machine with no error anywhere.
+
+        Re-registering everything also satisfies §14 ("In the event of
+        a name conflict on *any* interface, a host should configure a
+        new host name") for free — every per-interface host group is
+        rebuilt from the new ``_fqdn``, so no link is left answering to
+        the name we just conceded.
+
+        This is Avahi's model: its daemon withdraws the static services
+        and hosts, sets ``avahi_alternative_host_name`` via
+        ``avahi_server_set_host_name``, and re-adds everything once the
+        server is running again, at which point a service with no
+        explicit host picks up ``s->host_name_fqdn``.  mDNSResponder
+        reaches the same end state differently, rewriting every
+        ``AutoTarget`` record in place from ``mDNS_SetFQDN``.
+
+        The won name is process state, not config: nothing re-derives
+        it from ``_config``, so it survives every SIGHUP — the domain
+        half comes from the startup snapshot ``_domain`` for the same
+        reason.  Neither reference implementation persists it across
+        a restart and neither do we — Avahi likewise re-probes from
+        the configured name on startup and renames again if the
+        conflict is still there.
+
+        The rename loops until the probes for the new host groups come
+        back clean, per §9: "Probe again, and repeat as necessary
+        until a unique name is found."  Both references re-fire the
+        rename on every conflict — Apple's ``mDNS_HostNameCallback``
+        runs ``IncrementLabelSuffix`` + ``mDNS_SetFQDN`` again each
+        time, avahi re-enters ``AVAHI_SERVER_COLLISION`` and picks
+        another ``avahi_alternative_host_name``.  Here a conflict
+        against the renamed-to name surfaces as a rebuilt host group
+        left in COLLISION (its nested rename attempt was dropped by
+        the ``_rehoming`` guard), so the loop's post-rebuild check is
+        what carries the retry.  Pacing is inherited from the prober:
+        each iteration costs real probe rounds, and the §8.1 conflict
+        rate limit backs off a pathological run.
+
+        The retry is bounded by ``MAX_PROBE_RESTARTS`` via the
+        persistent ``_rename_restarts`` budget: once that many
+        rebuilds have failed, the loop stops with an error and every
+        later conflict-driven call no-ops instead of renaming
+        forever.  §9 step 5 says a responder that cannot find an
+        unused name "should log an error message to inform the user
+        or operator of this fact", and Apple bounds the same retry
+        with ``MAX_PROBE_RESTARTS`` against the record's persistent
+        restart count (``mDNSCoreReceiveResponse``).  The budget has
+        to outlive one call: the losing probe of the final attempt
+        queues one more conflict task, which would otherwise restart
+        the loop fresh.  The host groups then stay in COLLISION —
+        withdrawn, answering nowhere — until a full rebuild reload
+        or a restart resets the budget.
+
+        Runs under ``_rebuild_lock`` so the rebuild can't interleave
+        with a SIGHUP reload's own registry mutation.
+        """
+        if self._rename_restarts >= MAX_PROBE_RESTARTS:
+            # Budget exhausted by a previous run — typically this is
+            # the conflict task its own losing probe queued.  A full
+            # rebuild reload (or restart) is the recovery path.
+            logger.debug(
+                "Host rename restart budget exhausted — ignoring "
+                "conflict for %s", self._fqdn,
+            )
+            return
+        if self._rehoming:
+            # A conflict raised against the records we are in the
+            # middle of re-registering.  Renaming again from here would
+            # re-enter ``_reregister_all`` and cancel this rebuild
+            # partway through; drop it — the loop below re-checks the
+            # host groups after the rebuild and renames again if the
+            # conflict marked one COLLISION.
+            logger.info(
+                "Host rename already in progress — ignoring nested "
+                "conflict for %s", self._fqdn,
+            )
+            return
+
+        self._rehoming = True
+        try:
+            async with self._get_rebuild_lock():
+                while True:
+                    old_fqdn = self._fqdn
+                    self._hostname = generate_alternative_name(
+                        self._hostname,
+                    )
+                    self._fqdn = f"{self._hostname}.{self._domain}"
+                    logger.warning(
+                        "Host name conflict: %s -> %s",
+                        old_fqdn, self._fqdn,
+                    )
+                    await self._reregister_all()
+                    if not any(
+                        g.state == EntryGroupState.COLLISION
+                        for g in self._host_groups
+                    ):
+                        self._rename_restarts = 0
+                        break
+                    self._rename_restarts += 1
+                    if self._rename_restarts >= MAX_PROBE_RESTARTS:
+                        logger.error(
+                            "Host name conflict persists after %d "
+                            "renames — giving up until the next "
+                            "reload or restart (RFC 6762 §9: \"This "
+                            "situation should never occur in normal "
+                            "operation\")",
+                            self._rename_restarts,
+                        )
+                        break
+        finally:
+            self._rehoming = False
 
     def _check_cooperating_responders(
         self, message: MDNSMessage, ifindex: int,
@@ -505,6 +717,11 @@ class MDNSServer(ConfigDaemon):
         ``RecordType`` resets to ``kDNSRecordTypeUnique``,
         ``ProbeCount`` to ``DefaultProbeCountForTypeUnique`` (3),
         ``RecordProbeFailure`` increments the rate-limit counter.
+
+        A conflict against a record that skipped probing (§8.1,
+        ``should_probe`` False) takes Apple's other branch instead:
+        the record is discarded, not re-probed — see
+        ``_discard_known_unique_conflict``.
         """
         # Collect (name_lower, rtype) pairs whose peer rdata differs
         # from *every* UNIQUE (cache-flush) record we own on this
@@ -528,6 +745,14 @@ class MDNSServer(ConfigDaemon):
         # than our in-memory copy.
         conflicts: set[tuple[str, QType]] = set()
         for rr in message.answers:
+            # RFC 6762 §10.1: TTL=0 is a goodbye — a withdrawal, not
+            # an assertion — so different rdata in one is a peer
+            # retracting its own record, not claiming ours.  Apple
+            # gates identically (``rroriginalttl > 0`` before
+            # ``PacketRRConflict``), and avahi ignores goodbyes that
+            # match none of its own records.
+            if rr.ttl == 0:
+                continue
             owned = self._registry.lookup(
                 rr.key.name, rr.key.rtype, ifindex,
             )
@@ -538,7 +763,16 @@ class MDNSServer(ConfigDaemon):
                 continue
             if any(ow.record.data == rr.data for ow in unique_owned):
                 continue
-            conflicts.add((rr.key.name.lower(), rr.key.rtype))
+            if any(ow.should_probe for ow in unique_owned):
+                conflicts.add((rr.key.name.lower(), rr.key.rtype))
+            else:
+                # A record whose uniqueness was assumed rather than
+                # claimed by probing (§8.1) was never Verified, so a
+                # peer disagreeing about it is not something
+                # re-probing could settle — withdraw ours instead.
+                self._discard_known_unique_conflict(
+                    unique_owned, rr, source,
+                )
         if not conflicts:
             return
 
@@ -550,7 +784,7 @@ class MDNSServer(ConfigDaemon):
                     and ifindex not in group.interfaces):
                 continue
             matched = any(
-                ow.record.cache_flush and (
+                ow.record.cache_flush and ow.should_probe and (
                     ow.record.key.name.lower(), ow.record.key.rtype,
                 ) in conflicts
                 for ow in group.owned_records
@@ -576,6 +810,78 @@ class MDNSServer(ConfigDaemon):
                 lambda t: self._conflict_tasks.remove(t)
                 if t in self._conflict_tasks else None
             )
+
+    def _discard_known_unique_conflict(
+        self, owned: list[OwnedRecord], peer: MDNSRecord, source: tuple,
+    ) -> None:
+        """Withdraw an un-probed unique record a peer has contradicted.
+
+        Re-probing cannot settle this conflict: the reverse address
+        PTR's name is derived from the address, so no rename moves it
+        out of the peer's way, and the §9 loser can only "cease using
+        the name" by ceasing to publish the record.  Mirrors Apple
+        mDNSResponder's ``kDNSRecordTypeKnownUnique`` branch in
+        ``mDNSCoreReceiveResponse``: "We assumed this record must be
+        unique, but we were wrong.  (e.g. There are two mDNSResponders
+        on the same machine giving different answers for the reverse
+        mapping record, or there are two machines on the network using
+        the same IP address.)  This is simply a misconfiguration, and
+        there's nothing we can do to fix it -- e.g. it's not our job
+        to be trying to change the machine's IP address.  We just
+        discard our record to avoid continued conflicts (as we do for
+        a conflict on our Unique records) and get on with life."
+
+        No goodbye is sent: per Apple's ``mDNS_Deregister_internal``
+        on ``mDNS_Dereg_conflict``, TTL=0 withdrawal is for shared
+        records only — the peer's own cache-flush announcements are
+        what correct peer caches.  A later rebuild (host rename,
+        reload) re-publishes the record; if the underlying address
+        conflict is still there, the peer's next answer discards it
+        again.
+
+        Removing the record from its group is not enough to stop
+        asserting it: an in-flight announce task holds a pre-removal
+        snapshot of ``group.records``, and a deferred responder batch
+        may hold the record too — stragglers would keep re-asserting
+        the conceded record with the cache-flush bit for seconds
+        after the discard (RFC 6762 §8.4 / §10.1).  Both are
+        dropped; the group's surviving records then get a fresh
+        announce sequence, keeping them at §8.3's "at least two
+        unsolicited responses".
+        """
+        touched: list[EntryGroup] = []
+        for ow in owned:
+            for group in self._entry_groups:
+                if group.remove_record(ow):
+                    if group not in touched:
+                        touched.append(group)
+                    break
+        for ifstate in self._interfaces.values():
+            if ifstate.responder is not None:
+                ifstate.responder.drop_pending(owned)
+        for group in touched:
+            if not self._cancel_group_announces(group):
+                # No announce was in flight, so nothing stale is on
+                # the wire and the survivors' sequences completed.
+                continue
+            if not group.records:
+                continue
+            for ifstate in self._interfaces.values():
+                if (group.interfaces is not None
+                        and ifstate.iface.index not in group.interfaces):
+                    continue
+                if ifstate.announcer:
+                    task = ifstate.announcer.schedule_announce(
+                        group.records,
+                    )
+                    self._track_announce(group, task)
+        logger.warning(
+            "RFC 6762 §9: peer %s asserts conflicting rdata for %s "
+            "(%s) — discarding our un-probed record (two hosts using "
+            "the same IP address?)",
+            source[0] if source else "unknown",
+            peer.key.name, peer.key.rtype.name,
+        )
 
     async def _on_link_up(self, ifindex: int) -> None:
         """BCT II.17 / RFC 6762 §8.3 hot-plug re-probe with flap
@@ -661,17 +967,21 @@ class MDNSServer(ConfigDaemon):
 
     # -- Reload ---------------------------------------------------------------
 
-    def _on_config_applied(self, new_config: DaemonConfig) -> None:
-        """Re-derive hostname and FQDN after a SIGHUP config swap.
+    def _get_rebuild_lock(self) -> asyncio.Lock:
+        """The lock serializing whole-registry mutation paths.
 
-        ``ConfigDaemon.apply_config`` stashes ``_prev_config`` and
-        replaces ``_config`` for us; we only need to refresh the
-        cached fields derived from the new config so ``_reload``
-        (and everything it calls — responder/prober/announcer,
-        service loader, host-address registration) sees consistent
-        hostname/FQDN values."""
-        self._hostname = get_hostname(new_config.server)
-        self._fqdn = f"{self._hostname}.{new_config.server.domain_name}"
+        Created lazily, and re-created when the running loop has
+        changed: asyncio primitives bind to the loop that first
+        awaits them, and serialization is only meaningful between
+        tasks of one loop — the daemon runs a single loop for life,
+        while tests drive one server across several short-lived
+        loops.
+        """
+        loop = asyncio.get_running_loop()
+        if self._rebuild_lock is None or self._rebuild_lock_loop is not loop:
+            self._rebuild_lock = asyncio.Lock()
+            self._rebuild_lock_loop = loop
+        return self._rebuild_lock
 
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
@@ -679,16 +989,27 @@ class MDNSServer(ConfigDaemon):
         Picks one of three paths based on what actually changed since
         the previous ``apply_config``:
 
-        * **full rebuild** — interfaces or IPv4/IPv6 toggle changed,
-          or this is the first SIGHUP (``_prev_config is None``).
-          Transports rebuild, every record goodbyes.
-        * **host rename** — hostname or domain changed.  Every record
-          goodbyes + re-probes under the new name but transports and
-          per-interface tasks stay up.
+        * **full rebuild** — interfaces, IPv4/IPv6 toggle, or the
+          ``disallow-other-stacks`` bind policy changed, or this is
+          the first SIGHUP (``_prev_config is None``).  Transports
+          rebuild, every record goodbyes.
         * **service delta** — only ``services.d`` on disk may have
           changed.  Removed services get a targeted goodbye, added
           services probe + announce individually; host A/AAAA
-          records and untouched services keep running."""
+          records and untouched services keep running.
+
+        A changed ``host-name`` / ``domain-name`` is deliberately not
+        a reload path.  The name we answer to is fixed for the life of
+        the process: it is established by probing at startup and may
+        then be moved only by RFC 6762 §9 conflict resolution, whose
+        result nothing must silently revert.  Re-deriving it from
+        config on every SIGHUP would do exactly that, and would put a
+        host that had legitimately renamed itself back onto the
+        contested name.  Changing the configured name is a service
+        restart, which middleware already issues — a hostname edit
+        goes through ``network.configuration.do_update``, whose
+        ``toggle_announcement`` call restarts the daemon rather than
+        reloading it."""
         prev = self._prev_config
         cur = self._config
 
@@ -697,15 +1018,10 @@ class MDNSServer(ConfigDaemon):
             or prev.server.interfaces != cur.server.interfaces
             or prev.server.use_ipv4 != cur.server.use_ipv4
             or prev.server.use_ipv6 != cur.server.use_ipv6
+            or (prev.server.disallow_other_stacks
+                != cur.server.disallow_other_stacks)
         ):
             await self._full_rebuild_reload()
-            return
-
-        if (
-            prev.server.host_name != cur.server.host_name
-            or prev.server.domain_name != cur.server.domain_name
-        ):
-            await self._host_rename_reload()
             return
 
         await self._service_delta_reload()
@@ -719,50 +1035,64 @@ class MDNSServer(ConfigDaemon):
         to diff against, so we don't know what changed)."""
         logger.info("Reload: full rebuild")
 
+        # Cancel before taking the lock: a rename task holding
+        # ``_rebuild_lock`` unwinds at its next await (its probe
+        # re-raises the cancellation), which is what frees the
+        # acquisition below.
         for task in self._conflict_tasks:
             task.cancel()
         self._conflict_tasks.clear()
 
-        for ifstate in self._interfaces.values():
-            owned = self._registry.get_all_records(ifstate.iface.index)
-            if owned:
-                send_goodbye(
-                    ifstate.transport.send_message,
-                    [ow.record for ow in owned],
-                )
+        async with self._get_rebuild_lock():
+            for ifstate in self._interfaces.values():
+                owned = self._registry.get_all_records(ifstate.iface.index)
+                if owned:
+                    send_goodbye(
+                        ifstate.transport.send_message,
+                        [ow.record for ow in owned],
+                    )
 
-        # Cancel per-interface schedulers and tasks before dropping the
-        # ifstate refs — otherwise their TimerHandles and Tasks survive
-        # the clear() and keep firing against closed transports.
-        for ifstate in self._interfaces.values():
-            await ifstate.stop()
-        self._interfaces.clear()
-        # ifstate.stop() already cancelled every announcer task; drop
-        # the now-dangling per-group handles so they don't linger.
-        self._announce_tasks.clear()
+            # Cancel per-interface schedulers and tasks before dropping
+            # the ifstate refs — otherwise their TimerHandles and Tasks
+            # survive the clear() and keep firing against closed
+            # transports.
+            for ifstate in self._interfaces.values():
+                await ifstate.stop()
+            self._interfaces.clear()
+            # ifstate.stop() already cancelled every announcer task;
+            # drop the now-dangling per-group handles so they don't
+            # linger.
+            self._announce_tasks.clear()
 
-        for group in self._entry_groups:
-            self._registry.remove_group(group)
-        self._entry_groups.clear()
-        self._service_groups.clear()
+            for group in self._entry_groups:
+                self._registry.remove_group(group)
+            self._entry_groups.clear()
+            self._service_groups.clear()
+            # An admin-driven rebuild is the recovery path from an
+            # exhausted rename budget: everything re-probes fresh, so
+            # the §9 retry allowance starts over too.
+            self._rename_restarts = 0
 
-        loop = asyncio.get_running_loop()
-        await self._setup_interfaces(loop)
-        await self._load_static_services()
-        self._register_host_addresses()
+            loop = asyncio.get_running_loop()
+            await self._setup_interfaces(loop)
+            await self._load_static_services()
+            self._register_host_addresses()
 
-        for group in self._entry_groups:
-            await self._probe_and_announce(group)
+            # Snapshot: a probe conflict raised mid-loop schedules
+            # ``_resolve_conflict``, and a host-name conflict there
+            # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
+            for group in list(self._entry_groups):
+                await self._probe_and_announce(group)
 
-        self._wake.set()
+            self._wake.set()
 
-        logger.info(
-            "Full rebuild complete: %d services on %d interfaces",
-            len(self._entry_groups), len(self._interfaces),
-        )
+            logger.info(
+                "Full rebuild complete: %d services on %d interfaces",
+                len(self._entry_groups), len(self._interfaces),
+            )
 
-    async def _host_rename_reload(self) -> None:
-        """Hostname or domain changed: goodbye + re-probe everything.
+    async def _reregister_all(self) -> None:
+        """Goodbye every record, then re-register under ``_fqdn``.
 
         Every owned record references the host FQDN somehow — A/AAAA
         keys, SRV targets, and (for ``instance_name = %h``) service
@@ -771,11 +1101,19 @@ class MDNSServer(ConfigDaemon):
         up because interfaces didn't change; responder/prober/
         announcer resume against the new records as soon as they're
         re-registered."""
-        logger.info("Reload: host rename -> %s", self._fqdn)
+        logger.info("Re-registering every record as %s", self._fqdn)
 
+        # The caller runs inside one of these tasks — the §9 rename is
+        # driven from ``_resolve_conflict`` — so cancelling the list
+        # wholesale would cancel us partway through the rebuild.  The
+        # surviving entry is dropped by its own done-callback.
+        current = asyncio.current_task()
         for task in self._conflict_tasks:
-            task.cancel()
-        self._conflict_tasks.clear()
+            if task is not current:
+                task.cancel()
+        self._conflict_tasks = [
+            t for t in self._conflict_tasks if t is current
+        ]
 
         # RFC 6762 §8.4 / §10.1: every group is about to goodbye and
         # re-register under the new name, so cancel all in-flight
@@ -809,13 +1147,16 @@ class MDNSServer(ConfigDaemon):
         await self._load_static_services()
         self._register_host_addresses()
 
-        for group in self._entry_groups:
+        # Snapshot: a probe conflict raised mid-loop schedules
+        # ``_resolve_conflict``, and a host-name conflict there
+        # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
+        for group in list(self._entry_groups):
             await self._probe_and_announce(group)
 
         self._wake.set()
 
         logger.info(
-            "Host rename complete: %d services under %s",
+            "Re-registration complete: %d services under %s",
             len(self._service_groups), self._fqdn,
         )
 
@@ -855,7 +1196,17 @@ class MDNSServer(ConfigDaemon):
         targeted goodbye + registry drop, added services probe +
         announce individually.  Host A/AAAA records, untouched
         services, responders, probers, and announcers all keep
-        running untouched."""
+        running untouched.
+
+        Runs under ``_rebuild_lock``: the keys are derived from
+        ``_hostname`` / ``_fqdn`` before the add loop's awaits, and a
+        §9 rename replacing the registry mid-loop would otherwise
+        leave this path appending stale-keyed groups — the same
+        service twice, under two names — next to the rebuilt ones."""
+        async with self._get_rebuild_lock():
+            await self._service_delta_reload_locked()
+
+    async def _service_delta_reload_locked(self) -> None:
         loop = asyncio.get_running_loop()
         services = await loop.run_in_executor(
             None, load_service_directory, self._config.service_dir,
@@ -1039,13 +1390,17 @@ def _rename_group(group: EntryGroup) -> tuple[str | None, str | None]:
     """RFC 6762 §9: rewrite every record in *group* to use a new first
     label, returning ``(old_primary, new_primary)``.
 
-    "Primary name" is the SRV instance FQDN for a service group, or
-    the A/AAAA host FQDN for a host-address group.  The first DNS
-    label is renamed via ``generate_alternative_name`` and every
-    record whose ``key.name`` or ``PTRRecordData.target`` references
-    the old primary is rewritten in place.  Per-record scheduling
-    state (``last_multicast`` / ``last_peer_answer``) is reset so the
+    "Primary name" is the SRV instance FQDN.  The first DNS label is
+    renamed via ``generate_alternative_name`` and every record whose
+    ``key.name`` or ``PTRRecordData.target`` references the old
+    primary is rewritten in place.  Per-record scheduling state
+    (``last_multicast`` / ``last_peer_answer``) is reset so the
     re-probe starts with a clean slate.
+
+    Only service groups come through here.  A host-name collision
+    moves a name that other groups' SRV targets point at, so it is
+    resolved by re-registering the whole registry rather than editing
+    one group — see ``_rename_host_after_conflict``.
     """
     primary: str | None = None
     for ow in group.owned_records:

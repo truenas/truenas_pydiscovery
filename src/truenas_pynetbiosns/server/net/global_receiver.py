@@ -54,7 +54,7 @@ class NBNSGlobalReceiver:
 
     One ``(0.0.0.0, port)`` socket per port, shared across all
     interfaces.  Matches Samba 4.23's ``ClientNMB`` / ``ClientDGRAM``
-    in ``source3/nmbd/nmbd.c:735-744``.
+    in ``open_sockets`` (``source3/nmbd/nmbd.c``).
     """
 
     def __init__(
@@ -216,10 +216,10 @@ class NBNSGlobalReceiver:
     def _create_global_socket(self, port: int) -> socket.socket:
         """Create an INADDR_ANY UDP socket for catchall receive.
 
-        Mirrors Samba 4.23 ``source3/lib/util_sock.c:244-300``
-        (``open_socket_in_protocol``): ``SO_REUSEADDR`` and
+        Mirrors Samba 4.23 ``open_socket_in_protocol``
+        (``source3/lib/util_sock.c``): ``SO_REUSEADDR`` and
         ``SO_REUSEPORT`` only.  We additionally set
-        ``SO_BROADCAST`` because ``nmbd.c:756`` does
+        ``SO_BROADCAST`` because ``open_sockets`` does
         ``set_socket_options(ClientNMB, "SO_BROADCAST")`` and
         the semantic equivalent in 4.23 is still the same flag.
         """

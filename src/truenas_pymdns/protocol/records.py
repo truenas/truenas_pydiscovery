@@ -129,7 +129,7 @@ class RecordData:
 # Mirrors Apple mDNSResponder's identity predicate
 # ``IdenticalResourceRecord`` (mDNSCore/DNSCommon.h:317) and
 # case-folded hashing in ``DomainNameHashValue``/``SameDomainName``
-# (mDNSCore/DNSCommon.c:3014).
+# (``DomainNameHashValue`` in mDNSCore/DNSCommon.c:3014).
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -477,9 +477,9 @@ class MDNSRecord:
         (must rename) and positive means "self wins".
 
         rdata is compared as raw, uncompressed wire bytes taken as
-        unsigned octets (RFC 6762 §8.2, docs/specs/rfc6762.txt:1556,
-        1582).  For name-bearing rdata (PTR/SRV target) those bytes are
-        length-prefixed and case-preserving, matching Apple
+        unsigned octets (RFC 6762 §8.2).  For name-bearing rdata
+        (PTR/SRV target) those bytes are length-prefixed and
+        case-preserving, matching Apple
         mDNSResponder's ``CompareRData`` (mDNSCore/mDNS.c:7893); a
         case-folded string compare orders length-differing labels wrong
         (e.g. ``z.local`` vs ``aa.local``).

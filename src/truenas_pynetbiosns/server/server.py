@@ -88,7 +88,8 @@ class NBNSServer(ConfigDaemon):
         # Daemon-level catchall receiver on (0.0.0.0, 137/138) for
         # limited broadcasts and anything not matching a per-interface
         # specific-IP bind.  Mirrors Samba 4.23's ``ClientNMB`` /
-        # ``ClientDGRAM`` at ``source3/nmbd/nmbd.c:735-744``.
+        # ``ClientDGRAM`` in ``open_sockets``
+        # (``source3/nmbd/nmbd.c``).
         self._global_recv: NBNSGlobalReceiver | None = None
         self._status = StatusWriter(config.rundir, logger)
 

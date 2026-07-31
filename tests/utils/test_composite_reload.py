@@ -86,9 +86,18 @@ class TestApplyConfig:
     derived from it, so the subsequent ``_reload()`` sees the new
     values."""
 
-    def test_mdns_apply_config_replaces_config_and_rederives_hostname(
+    def test_mdns_apply_config_keeps_the_running_host_name(
         self, tmp_path,
     ):
+        """mDNS is the exception: the config swaps but the name does
+        not follow it.
+
+        The name is established by probing at startup and afterwards
+        moves only through RFC 6762 §9 conflict resolution.  Re-deriving
+        it here would silently revert a name the daemon had won and put
+        it back on the contested one, so a configured hostname change
+        is a restart rather than a reload.
+        """
         server = MDNSServer(MdnsConfig(
             server=MdnsServerConfig(host_name="old-host"),
             service_dir=tmp_path / "no-services",
@@ -107,8 +116,8 @@ class TestApplyConfig:
         server.apply_config(new_cfg)
 
         assert server._config is new_cfg
-        assert server._hostname == "new-host"
-        assert server._fqdn == "new-host.lan"
+        assert server._hostname == "old-host"
+        assert server._fqdn == "old-host.local"
 
     def test_netbiosns_apply_config_replaces_config(self, tmp_path):
         server = NBNSServer(NbnsConfig(
@@ -179,7 +188,10 @@ class TestReloadDispatch:
         asyncio.run(composite._reload())
 
         assert mdns._config is new_mdns
-        assert mdns._hostname == "new-host"
+        # The sub-config reaches the child, but mDNS deliberately keeps
+        # answering to the name it probed for — see
+        # ``test_mdns_apply_config_keeps_the_running_host_name``.
+        assert mdns._hostname == "old-host"
         assert nbns._config is new_nbns
         assert wsd._config is new_wsd
 

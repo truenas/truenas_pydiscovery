@@ -15,23 +15,51 @@ from truenas_pymdns.protocol.constants import (
 IP_RECVTTL = getattr(socket, "IP_RECVTTL", 12)
 
 
+def _set_port_sharing(
+    sock: socket.socket, disallow_other_stacks: bool,
+) -> None:
+    """Apply the avahi ``disallow-other-stacks`` bind policy.
+
+    When sharing is allowed, SO_REUSEADDR + SO_REUSEPORT let another
+    cooperating mDNS stack (avahi, mDNSResponder, systemd-resolved)
+    bind UDP 5353 alongside us — avahi's default, and what
+    ``avahi_open_socket_ipv4`` (avahi-core/socket.c:311) does unless
+    ``disallow-other-stacks`` is set.  When disallowed, the options
+    are simply omitted so the bind is exclusive: another stack's
+    bind fails while we run, and ours fails (logged per family by
+    ``MDNSTransport.start``) if one already holds the port.
+
+    The daemon's own per-interface sockets keep coexisting either
+    way: each is SO_BINDTODEVICE-bound to its own device, and the
+    kernel's UDP bind-conflict check (``udp_lib_lport_inuse``,
+    net/ipv4/udp.c) exempts sockets bound to different devices.
+    Two exclusive sockets on the *same* device do conflict — which
+    is why tests stacking several transports on loopback opt out.
+    """
+    if disallow_other_stacks:
+        return
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass
+
+
 def create_v4_socket(
     interface_name: str,
     interface_addr: str,
+    disallow_other_stacks: bool = True,
 ) -> socket.socket:
     """Create an IPv4 multicast UDP socket for mDNS.
 
     Binds to 0.0.0.0:5353 on the given interface.  Sets socket options
     needed for mDNS: multicast TTL 255, loopback enabled, receive-TTL
-    for ancillary data validation, and interface binding.
+    for ancillary data validation, and interface binding.  See
+    ``_set_port_sharing`` for the *disallow_other_stacks* bind policy.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass
+        _set_port_sharing(sock, disallow_other_stacks)
 
         # RFC 6762 s11: multicast TTL must be 255
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MDNS_TTL)
@@ -66,18 +94,16 @@ def create_v4_socket(
 def create_v6_socket(
     interface_index: int,
     interface_name: str,
+    disallow_other_stacks: bool = True,
 ) -> socket.socket:
     """Create an IPv6 multicast UDP socket for mDNS.
 
-    Binds to [::]:5353 on the given interface.
+    Binds to [::]:5353 on the given interface.  See
+    ``_set_port_sharing`` for the *disallow_other_stacks* bind policy.
     """
     sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass
+        _set_port_sharing(sock, disallow_other_stacks)
 
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         # RFC 6762 s11: multicast hop limit must be 255

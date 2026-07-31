@@ -148,3 +148,52 @@ class TestEntryGroup:
         eg.interfaces = [1, 2]
         eg.add_service("Test", "_http._tcp", "local", "h.local", 80)
         assert eg.interfaces == [1, 2]
+
+
+class TestReversePTRSkipsProbing:
+    """RFC 6762 §8.1: "If a responder knows by other means that its
+    unique resource record set name, rrtype, and rrclass cannot already
+    be in use by any other responder on the network, then it SHOULD skip
+    the probing step for that resource record set.  For example, when
+    creating the reverse address mapping PTR records..."
+    """
+
+    def test_reverse_ptr_is_not_probed(self):
+        eg = EntryGroup()
+        eg.add_address("truenas.local", "192.0.2.10")
+        probed = eg.get_unique_records()
+
+        assert [r.key.rtype for r in probed] == [QType.A]
+        assert not any(
+            "in-addr.arpa" in r.key.name for r in probed
+        )
+
+    def test_reverse_ptr_is_still_announced_as_unique(self):
+        """Skipping the probe must not downgrade the record: it is
+        still published with the cache-flush bit, only the ownership
+        claim is skipped."""
+        eg = EntryGroup()
+        eg.add_address("truenas.local", "192.0.2.10")
+
+        ptr = [r for r in eg.records if r.key.rtype == QType.PTR][0]
+        assert "in-addr.arpa" in ptr.key.name
+        assert ptr.cache_flush is True
+
+    def test_probing_a_host_with_two_addresses_covers_both(self):
+        """The exemption is per-record, not per-group — every address
+        record still gets probed."""
+        eg = EntryGroup()
+        eg.add_address("truenas.local", "192.0.2.10")
+        eg.add_address("truenas.local", "192.0.2.11")
+        probed = eg.get_unique_records()
+
+        assert {r.data.address for r in probed} == {
+            IPv4Address("192.0.2.10"), IPv4Address("192.0.2.11"),
+        }
+
+    def test_service_records_are_still_probed(self):
+        eg = EntryGroup()
+        eg.add_service("Test", "_http._tcp", "local", "h.local", 80)
+        probed = eg.get_unique_records()
+
+        assert {r.key.rtype for r in probed} == {QType.SRV, QType.TXT}

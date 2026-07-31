@@ -104,6 +104,12 @@ class Prober:
         ``conflicts_seen`` → rename, matching avahi (unbounded rename)
         and mDNSResponder (``ProbingConflictCount`` → rename); neither
         reference permanently disables probing for a whole interface.
+
+        Cancelling the awaiting *task* propagates ``CancelledError``
+        — shutdown and the reload paths rely on ``task.cancel()``
+        actually stopping a conflict task parked here.  Only
+        ``cancel_all`` (a session-level abort) turns into a False
+        return.
         """
         if not records:
             return True
@@ -128,9 +134,17 @@ class Prober:
         try:
             return await future
         except asyncio.CancelledError:
+            # The awaiting task was cancelled (daemon shutdown, full
+            # rebuild) — not a probe outcome.  Mark the session
+            # resolved so the aggregated cycle drops it, and let the
+            # cancellation propagate: swallowing it here would leave
+            # a "cancelled" conflict task running its rebuild
+            # concurrently with the canceller's.  A session-level
+            # abort (``cancel_all``) resolves ``future`` with False
+            # instead and never raises here.
             if not future.done():
-                future.set_result(False)
-            return False
+                future.cancel()
+            raise
         finally:
             self._sessions.pop(session_key, None)
 
@@ -364,10 +378,10 @@ class Prober:
                     )
             # RFC 6762 s8.1: "Cache Flush Bit Not Set in Proposed Answer
             # of Probes" — clear the unique-RRSet bit on records sent in
-            # the Authority section.  mDNSResponder's SendQueries
-            # (mDNSCore/mDNS.c:4519-4534) writes probe Authority records
-            # without the `rrclass |= kDNSClass_UniqueRRSet` flip it uses
-            # for Answer-section writes.
+            # the Authority section.  mDNSResponder's ``SendQueries``
+            # (mDNSCore/mDNS.c:4519-4534) writes probe Authority records without
+            # the `rrclass |= kDNSClass_UniqueRRSet` flip it uses for
+            # Answer-section writes.
             auth_set.update(
                 replace(r, cache_flush=False) for r in session.records
             )

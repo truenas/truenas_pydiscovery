@@ -206,9 +206,9 @@ class MDNSTransport:
                     source_port, addr,
                 )
                 return
-            # RFC 6762 §11 (docs/specs/rfc6762.txt:2108-2125): mDNS
-            # responses are sent with IP TTL 255; one arriving with a
-            # lower TTL crossed a router and is off-link, so drop it as
+            # RFC 6762 §11: mDNS responses are sent with IP TTL 255;
+            # one arriving with a lower TTL crossed a router and is
+            # off-link, so drop it as
             # an anti-spoofing guard.  Scoped to responses (mirrors
             # avahi's check_response_ttl) — §11 mandates an address
             # check, not a TTL drop — and a missing TTL cmsg is treated
@@ -234,7 +234,7 @@ class MDNSTransport:
                 # Linux delivers the *received* TTL in an IP_TTL (2)
                 # cmsg; IP_RECVTTL (12) is only the setsockopt enable
                 # option, never the cmsg_type of a delivered value.
-                # Accept either — avahi (avahi-core/socket.c:726-733)
+                # Accept either — avahi (``avahi_recv_dns_packet_ipv4``)
                 # and mDNSResponder (mDNSPosix/mDNSUNP.c) both do.
                 if cmsg_level == socket.IPPROTO_IP and cmsg_type in (
                     socket.IP_TTL, IP_RECVTTL,

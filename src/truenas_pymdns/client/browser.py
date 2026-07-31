@@ -163,8 +163,8 @@ class Browser:
     def _process_batch(self, records: list[MDNSRecord]) -> None:
         targets = extract_ptr_targets(records, self._browse_name)
         for target in targets:
-            # RFC 6762 §10.1 (docs/specs/rfc6762.txt:1842-1867): a TTL=0
-            # PTR is a goodbye — a deletion, never a discovery.  Emit
+            # RFC 6762 §10.1: a TTL=0 PTR is a goodbye — a deletion,
+            # never a discovery.  Emit
             # REMOVE only for a target we had; a goodbye for a target we
             # never saw is ignored (both avahi and mDNSResponder treat
             # TTL=0 as delete-only and never synthesise an add).  A batch

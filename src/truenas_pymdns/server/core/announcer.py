@@ -18,8 +18,8 @@ class Announcer:
     Sends ANNOUNCE_COUNT announcements at doubling intervals
     (1s, 2s, 4s).  Each record is announced with its own cache-flush
     bit — set on unique records, clear on shared DNS-SD PTRs — per
-    RFC 6762 §10.2 (docs/specs/rfc6762.txt:1919-1954: the cache-flush
-    bit MUST NOT be set on shared records).
+    RFC 6762 §10.2 (the cache-flush bit MUST NOT be set on shared
+    records).
     """
 
     def __init__(self, send_fn: Callable[[MDNSMessage], None]) -> None:
@@ -32,7 +32,7 @@ class Announcer:
         """Send the announcement sequence for a set of records.
 
         *count* defaults to ``ANNOUNCE_COUNT`` (3).  Callers reacting to
-        a flapping interface (BCT II.17 / mDNSCore/mDNS.c:14262) pass
+        a flapping interface (BCT II.17 / ``mDNS_RegisterInterface``) pass
         ``LINK_FLAP_ANNOUNCE_COUNT`` (1) to cut multicast traffic.
         """
         delay = ANNOUNCE_INTERVAL_INITIAL

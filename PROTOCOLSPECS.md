@@ -66,8 +66,8 @@ Windows 11 hosts doing peer discovery against each other:
 <pub:Computer>WALKSURF/Workgroup:WORKGROUP</pub:Computer>
 ```
 
-`wsdd` (christgau/wsdd `src/wsdd.py:1059`) and `wsdd-native`
-(`src/wsd_server.cpp:612`) — the two Windows-interoperable reference
+`wsdd` (christgau/wsdd `handle_get`) and `wsdd-native`
+(`buildFullComputerName`) — the two Windows-interoperable reference
 implementations — also emit `/Workgroup:`. Our
 `build_get_response` in `src/truenas_pywsd/protocol/messages.py`
 does too. Treat the MS-PBSD `\` as a spec typo; follow the

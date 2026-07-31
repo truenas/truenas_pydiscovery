@@ -10,7 +10,7 @@ text and the device never appears in Explorer's Network view.
 The fix (``soap.py::_declare_text_only_namespaces``) adds ``xmlns:``
 attrs on the envelope root for every ``NS_MAP`` prefix whose URI
 isn't already used as an element tag — mirroring what
-``christgau/wsdd`` does unconditionally at ``wsdd.py:506-507``.
+``christgau/wsdd`` does unconditionally in ``build_message_tree``.
 """
 from __future__ import annotations
 

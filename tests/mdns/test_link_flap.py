@@ -1,7 +1,7 @@
 """Link-flap throttling on hot-plug re-probing.
 
 Mirrors Apple mDNSResponder's ``mDNS_RegisterInterface`` flap
-handling at ``mDNSCore/mDNS.c:14262-14273``: re-registration within
+handling in ``mDNS_RegisterInterface``: re-registration within
 ``LINK_FLAP_WINDOW`` triggers a longer probe delay and reduces the
 announcement count to one packet.
 

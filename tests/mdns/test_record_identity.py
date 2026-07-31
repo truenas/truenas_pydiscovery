@@ -1,7 +1,7 @@
 """Identity-based equality and hashing for MDNSRecord.
 
 Apple mDNSResponder's ``IdenticalResourceRecord``
-(``mDNSCore/DNSCommon.h:317``) defines record identity as
+(``mDNSCore/DNSCommon.h``) defines record identity as
 ``(name, class, type, rdata)``.  TTL, cache-flush, and
 scheduling metadata are deliberately excluded.  Domain names in
 rdata (PTR/SRV target) are compared case-insensitively per

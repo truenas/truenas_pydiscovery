@@ -93,12 +93,12 @@ class Responder:
             if not matching:
                 continue
 
-            # RFC 6762 §7.1 (docs/specs/rfc6762.txt:1243-1249): suppress
-            # our answer only when the querier's known answer carries an
-            # RR TTL at least half the true value.  If its cached copy
-            # has decayed below half we MUST still answer, to refresh
-            # the querier before the record expires.  Map each known
-            # rdata to the largest TTL the querier listed for it.
+            # RFC 6762 §7.1: suppress our answer only when the
+            # querier's known answer carries an RR TTL at least half
+            # the true value.  If its cached copy has decayed below
+            # half we MUST still answer, to refresh the querier before
+            # the record expires.  Map each known rdata to the largest
+            # TTL the querier listed for it.
             known_ttl: dict[bytes, int] = {}
             for ka in message.answers:
                 if ka.key.name.lower() == question.name.lower():
@@ -240,7 +240,7 @@ class Responder:
         # Filter out records that fail rate limit or were recently
         # answered by a peer (distributed duplicate suppression).  Both
         # gates read this interface's timestamps only (RFC 6762 §6/§7.4
-        # are per-interface, docs/specs/rfc6762.txt:854-857).
+        # are per-interface).
         eligible: list[OwnedRecord] = []
         for ow in owned:
             # RFC 6762 §6: 1-second per-record, per-interface rate limit
@@ -256,7 +256,7 @@ class Responder:
         if not eligible:
             return
 
-        pkey = "|".join(sorted(self._record_key(ow.record) for ow in eligible))
+        pkey = self._pending_key(eligible)
 
         if pkey in self._pending:
             existing_records, _, _, _ = self._pending[pkey]
@@ -311,7 +311,7 @@ class Responder:
     ) -> list[MDNSRecord]:
         """RFC 6763 s12: when returning PTR, include SRV+TXT+A/AAAA."""
         additionals: list[MDNSRecord] = []
-        seen_keys: set[str] = set()
+        seen_keys: set[tuple] = set()
 
         for ans in answers:
             if (ans.key.rtype == QType.PTR
@@ -347,7 +347,7 @@ class Responder:
 
     def _address_records_for(
         self, hostname: str, interface_index: int,
-        seen_keys: set[str],
+        seen_keys: set[tuple],
     ) -> list[MDNSRecord]:
         result: list[MDNSRecord] = []
         for rtype in (QType.A, QType.AAAA):
@@ -361,5 +361,33 @@ class Responder:
         return result
 
     @staticmethod
-    def _record_key(rr: MDNSRecord) -> str:
-        return f"{rr.key.name.lower()}|{rr.key.rtype.value}"
+    def _pending_key(eligible: list[OwnedRecord]) -> str:
+        """Coalescing key for a batch of deferred multicast answers.
+
+        Identifies the batch by the RRSets it answers, so a repeat
+        query arriving inside the defer window merges into the pending
+        response instead of scheduling a second one.  Individual RRSet
+        members are then merged by object identity, which is why this
+        key stops at name and type.
+        """
+        return "|".join(sorted(
+            f"{ow.record.key.name.lower()}|{ow.record.key.rtype.value}"
+            for ow in eligible
+        ))
+
+    @staticmethod
+    def _record_key(rr: MDNSRecord) -> tuple:
+        """Identity used to keep an additional from being attached twice.
+
+        Keyed on (name, type, rdata): name and type alone identify an
+        RRSet, not a record, and a host with two addresses on one
+        interface owns a multi-member RRSet.  RFC 6762 §6.2 requires a
+        response to carry *all* the addresses valid on the interface
+        it is sent on, so every member has to survive the
+        de-duplication.
+
+        ``RecordData`` equality and hashing go through its case-folded
+        identity, which gives the §16 case-insensitive comparison for
+        name-bearing rdata (PTR and SRV targets) for free.
+        """
+        return (rr.key.name.lower(), rr.key.rtype.value, rr.data)

@@ -52,10 +52,16 @@ Override of the shared list for mDNS only.
 .TP
 .B host-name
 Override hostname for mDNS only.
+Read at startup only: mDNS probes for this name, and thereafter it
+changes only through RFC 6762 conflict resolution.  Editing it and
+reloading has no effect \(em restart the service instead.  See
+.BR truenas\-discoveryd (8).
 .TP
 .B domain-name
 mDNS domain, typically
 .BR local .
+Read at startup only, as for
+.BR host-name .
 .TP
 .BR use-ipv4 ", " use-ipv6
 .BR yes " / " no .

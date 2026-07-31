@@ -14,7 +14,7 @@ def lexicographic_compare(
     Returns the sign of ``ours - theirs`` after sorting both sides into
     the §8.2 lexicographical order and comparing element-by-element;
     ties fall through to ``len(ours) - len(theirs)`` (the set that runs
-    out of records first loses, docs/specs/rfc6762.txt:1631-1638).
+    out of records first loses, §8.2.1).
 
     Both the sort key and the per-record comparison use the raw,
     uncompressed rdata wire bytes (``MDNSRecord.lexicographic_cmp``),

@@ -190,7 +190,7 @@ class TestObsoleteSharedRecords:
         """SRV/TXT have cache_flush=True; the new announcement's
         cache-flush bit handles cache eviction, so they must NOT be
         in the goodbye list (matches mDNSResponder's
-        kDNSRecordTypeShared-only check at mDNSCore/mDNS.c:2231)."""
+        kDNSRecordTypeShared-only check in ``mDNS_Deregister_internal``)."""
         g = _service_group()
         pre = [ow.record for ow in g.owned_records]
         obs = _obsolete_shared_records(pre, "nas._test._tcp.local")

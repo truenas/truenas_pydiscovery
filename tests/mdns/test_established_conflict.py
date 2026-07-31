@@ -7,7 +7,7 @@ stale echoes from a real competing peer.
 
 Covers ``MDNSServer._check_established_conflicts`` in
 ``server/server.py``.  Mirrors Apple mDNSResponder's
-``kDNSRecordTypeVerified`` branch at ``mDNSCore/mDNS.c:10315-10328``.
+``kDNSRecordTypeVerified`` branch in ``mDNSCoreReceiveResponse``.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from truenas_pymdns.protocol.records import (
     ARecordData,
     MDNSRecord,
     MDNSRecordKey,
+    PTRRecordData,
 )
 from truenas_pymdns.server.core.entry_group import EntryGroup
 from truenas_pymdns.server.service.registry import ServiceRegistry
@@ -192,4 +193,115 @@ class TestEstablishedConflict:
         msg = MDNSMessage()
         msg.answers = [peer]
         _run_check(server, msg, 1)  # interface 1, not 2
+        assert captured.groups == []
+
+
+def _build_server_with_address() -> tuple[MDNSServer, EntryGroup, _Captured]:
+    """Server whose group came from ``add_address``: the A record is
+    probed, the reverse PTR is exempt (RFC 6762 §8.1)."""
+    group = EntryGroup()
+    group.add_address("myhost.local", "192.0.2.10")
+    group.set_state(EntryGroupState.REGISTERING)
+    group.set_state(EntryGroupState.ESTABLISHED)
+
+    reg = ServiceRegistry()
+    reg.add_group(group)
+
+    server = MDNSServer.__new__(MDNSServer)
+    server._registry = reg
+    server._entry_groups = [group]
+    server._conflict_tasks = []
+    server._interfaces = {}
+
+    captured = _Captured()
+    server._probe_and_announce = captured.capture  # type: ignore[method-assign]
+    return server, group, captured
+
+
+def _conflicting_reverse_ptr(ttl: int = 1800) -> MDNSRecord:
+    return MDNSRecord(
+        key=MDNSRecordKey(
+            IPv4Address("192.0.2.10").reverse_pointer, QType.PTR,
+        ),
+        ttl=ttl,
+        data=PTRRecordData("otherhost.local"),
+        cache_flush=True,
+    )
+
+
+class TestReversePTRConflictDiscardsRecord:
+    """A record whose uniqueness was assumed rather than claimed by
+    probing (RFC 6762 §8.1 reverse PTR) cannot be rescued by
+    re-probing: its name is derived from the address, so no rename
+    moves it out of the peer's way.  Apple's
+    ``kDNSRecordTypeKnownUnique`` branch in ``mDNSCoreReceiveResponse``
+    discards the record instead — "We just discard our record to avoid
+    continued conflicts (as we do for a conflict on our Unique
+    records) and get on with life" — with no goodbye, per
+    ``mDNS_Deregister_internal``'s shared-records-only goodbye rule.
+    """
+
+    def test_conflicting_reverse_ptr_is_discarded_not_reprobed(self):
+        server, _group, captured = _build_server_with_address()
+        rev = IPv4Address("192.0.2.10").reverse_pointer
+        msg = MDNSMessage()
+        msg.answers = [_conflicting_reverse_ptr()]
+        _run_check(server, msg, 1)
+
+        assert captured.groups == []
+        # Ours is withdrawn: reverse queries go unanswered, leaving
+        # the peer's assertion uncontested.
+        assert server._registry.lookup(rev, QType.PTR, 1) == []
+        # The probed A record is untouched.
+        assert server._registry.lookup("myhost.local", QType.A, 1)
+
+    def test_goodbye_with_conflicting_rdata_is_not_a_conflict(self):
+        """RFC 6762 §10.1: TTL=0 is a withdrawal, not an assertion —
+        a peer retracting its own record must not cost us ours.
+        Apple gates conflicts on ``rroriginalttl > 0``; avahi ignores
+        goodbyes matching none of its records."""
+        server, _group, captured = _build_server_with_address()
+        rev = IPv4Address("192.0.2.10").reverse_pointer
+        msg = MDNSMessage()
+        msg.answers = [_conflicting_reverse_ptr(ttl=0)]
+        _run_check(server, msg, 1)
+
+        assert captured.groups == []
+        assert server._registry.lookup(rev, QType.PTR, 1)
+
+    def test_identical_rdata_is_not_a_conflict(self):
+        """A cooperating responder (or our own multicast-loop echo)
+        asserting the same rdata is agreement, not conflict."""
+        server, _group, captured = _build_server_with_address()
+        rev = IPv4Address("192.0.2.10").reverse_pointer
+        peer = MDNSRecord(
+            key=MDNSRecordKey(rev, QType.PTR),
+            ttl=1800,
+            data=PTRRecordData("myhost.local"),
+            cache_flush=True,
+        )
+        msg = MDNSMessage()
+        msg.answers = [peer]
+        _run_check(server, msg, 1)
+
+        assert captured.groups == []
+        assert server._registry.lookup(rev, QType.PTR, 1)
+
+    def test_peer_conflicting_address_still_reprobes(self):
+        """Control: the same group does re-probe when the conflict is
+        on the record that was actually probed."""
+        server, group, captured = _build_server_with_address()
+        msg = MDNSMessage()
+        msg.answers = [_a("myhost.local", "192.0.2.99")]
+        _run_check(server, msg, 1)
+        assert captured.groups == [group]
+
+    def test_goodbye_for_probed_record_does_not_reprobe(self):
+        """The §10.1 goodbye gate covers the probed branch too: a
+        peer withdrawing a different-rdata A record is not claiming
+        our name."""
+        server, _group, captured = _build_server_with_address()
+        msg = MDNSMessage()
+        msg.answers = [_a("myhost.local", "192.0.2.99", ttl=0)]
+        _run_check(server, msg, 1)
         assert captured.groups == []

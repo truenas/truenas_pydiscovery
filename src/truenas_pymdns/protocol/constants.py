@@ -108,7 +108,7 @@ ANNOUNCE_INTERVAL_INITIAL = 1.0
 ANNOUNCE_COUNT = 3
 
 # Link-flap detection / throttling.  Mirrors Apple mDNSResponder's
-# ``mDNS_RegisterInterface`` (mDNSCore/mDNS.c:14262-14273) which uses
+# ``mDNS_RegisterInterface`` (mDNSCore/mDNS.c) which uses
 # a longer probe delay and reduced announcement count for a flapping
 # interface: *"In the case of a flapping interface, we pause for
 # five seconds, and reduce the announcement count to one packet."*

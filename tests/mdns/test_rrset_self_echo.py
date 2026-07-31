@@ -2,7 +2,7 @@
 
 A host with multiple IPv6 addresses on one interface owns several
 AAAA records for the same hostname.  ``IP_MULTICAST_LOOP=1``
-(``multicast.py:40``, intentional for own-probe detection in
+(``multicast.py``, intentional for own-probe detection in
 RFC 6762 §8.2) delivers our announcement back to us, so we see
 every AAAA record in the RRSET arrive as a "peer" record.
 

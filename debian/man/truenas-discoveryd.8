@@ -41,6 +41,18 @@ Without this flag, logging goes to syslog.
 Reload configuration across every enabled protocol.
 Each protocol re\-resolves interfaces, reloads local state, and
 re\-announces.
+.IP
+The mDNS host name is an exception: it is established by probing at
+startup and is not re\-read on reload.  Once running, it changes only
+through RFC 6762 conflict resolution, when another host on the link
+claims the same name and this one renames itself (for example
+\fBnas.local\fP to \fBnas\-2.local\fP).  Re\-deriving the name from
+the configuration file on every reload would silently undo that and
+put the daemon back onto the contested name.  To change the
+advertised host name, restart the service rather than reloading it;
+the name won by conflict resolution is not persisted, so a restart
+begins again from the configured name.  The current name is reported
+as \fBhostname\fP in the mDNS \fBstatus.json\fP.
 .TP
 .B SIGUSR1
 Write runtime status for every enabled protocol to its per\-protocol

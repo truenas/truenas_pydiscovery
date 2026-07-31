@@ -53,7 +53,7 @@ class TestAnnounceSendsCountPackets:
 
 class TestAnnouncementContent:
     def test_each_record_announced_with_its_own_cache_flush_bit(self):
-        """RFC 6762 §10.2 (docs/specs/rfc6762.txt:1919-1954): the
+        """RFC 6762 §10.2: the
         cache-flush bit MUST be set on unique records and MUST NOT be
         set on shared records.  The Announcer sends each record with
         the bit it was registered with — it must not force it on (which

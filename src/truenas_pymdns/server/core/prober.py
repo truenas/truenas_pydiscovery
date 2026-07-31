@@ -364,10 +364,10 @@ class Prober:
                     )
             # RFC 6762 s8.1: "Cache Flush Bit Not Set in Proposed Answer
             # of Probes" — clear the unique-RRSet bit on records sent in
-            # the Authority section.  mDNSResponder's SendQueries
-            # (mDNSCore/mDNS.c:4519-4534) writes probe Authority records
-            # without the `rrclass |= kDNSClass_UniqueRRSet` flip it uses
-            # for Answer-section writes.
+            # the Authority section.  mDNSResponder's ``SendQueries``
+            # (mDNSCore/mDNS.c) writes probe Authority records without
+            # the `rrclass |= kDNSClass_UniqueRRSet` flip it uses for
+            # Answer-section writes.
             auth_set.update(
                 replace(r, cache_flush=False) for r in session.records
             )

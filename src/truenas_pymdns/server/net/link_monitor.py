@@ -7,10 +7,10 @@ replug (BCT II.17 "HOT-PLUGGING") is the canonical trigger.
 Apple mDNSResponder's Linux port opens a NETLINK_ROUTE socket bound to
 RTMGRP_LINK + RTMGRP_IPV4_IFADDR + RTMGRP_IPV6_IFADDR and feeds each
 event into ``mDNS_RegisterInterface``, whose comment at
-``mDNSCore/mDNS.c:14251`` is explicit: *"we want to re-trigger our
+``mDNS_RegisterInterface`` (``mDNSCore/mDNS.c``) is explicit: *"we want to re-trigger our
 questions and re-probe our Resource Records, even if we believe that
 we previously had an active representative of this interface."*
-See also ``mDNSPosix/mDNSPosix.c:1620``.
+See also ``OpenIfNotifySocket`` in ``mDNSPosix/mDNSPosix.c``.
 
 This module exposes a stdlib-only equivalent: a parser for the
 netlink ifinfomsg stream and an asyncio-integrated ``LinkMonitor``

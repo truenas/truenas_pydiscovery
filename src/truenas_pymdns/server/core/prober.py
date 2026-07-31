@@ -30,7 +30,6 @@ from truenas_pymdns.protocol.constants import (
     CONFLICT_RATE_BACKOFF,
     CONFLICT_RATE_MAX,
     CONFLICT_RATE_WINDOW,
-    MAX_PROBE_RESTARTS,
     MAX_PROBING_CONFLICT_RETRIES,
     PROBE_COUNT,
     PROBE_INTERVAL,
@@ -81,7 +80,6 @@ class Prober:
         self._sessions: dict[str, ProbingSession] = {}
         # RFC 6762 s8.1: conflict rate limiting
         self._conflict_times: collections.deque[float] = collections.deque()
-        self._probe_restart_count: int = 0
         # Aggregation: sessions waiting for the first probe cycle
         self._pending_sessions: list[ProbingSession] = []
         self._aggregation_handle: asyncio.TimerHandle | None = None
@@ -99,22 +97,17 @@ class Prober:
         Multiple concurrent probe() calls are aggregated: their records
         are packed into shared probe messages (like avahi's probe-sched.c).
 
-        Returns False if MAX_PROBE_RESTARTS has been exceeded.
+        Returns False if a conflict forces a rename (RFC 6762 §8.2/§9);
+        the caller re-registers under an alternative name.  Runaway
+        re-probing is bounded by the §8.1 conflict rate limit
+        (``_wait_if_rate_limited``) and per-session
+        ``conflicts_seen`` → rename, matching avahi (unbounded rename)
+        and mDNSResponder (``ProbingConflictCount`` → rename); neither
+        reference permanently disables probing for a whole interface.
         """
         if not records:
             return True
 
-        if self._probe_restart_count >= MAX_PROBE_RESTARTS:
-            names = {r.key.name for r in records}
-            logger.error(
-                "Exceeded %d probe restarts for %s, giving up — "
-                "these services will not be discoverable on the "
-                "network until the daemon is restarted",
-                MAX_PROBE_RESTARTS, names,
-            )
-            return False
-
-        self._probe_restart_count += 1
         await self._wait_if_rate_limited()
 
         loop = asyncio.get_running_loop()

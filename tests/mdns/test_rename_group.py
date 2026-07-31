@@ -120,12 +120,12 @@ class TestRenameServiceGroup:
     def test_scheduling_state_reset(self):
         g = _service_group()
         for ow in g.owned_records:
-            ow.last_multicast = 123.0
-            ow.last_peer_answer = 456.0
+            ow.last_multicast = {1: 123.0}
+            ow.last_peer_answer = {1: 456.0}
         _rename_group(g)
         for ow in g.owned_records:
-            assert ow.last_multicast == 0.0
-            assert ow.last_peer_answer == 0.0
+            assert ow.last_multicast == {}
+            assert ow.last_peer_answer == {}
 
     def test_second_rename_increments_suffix(self):
         """After one rename, a second collision must yield `-3`,

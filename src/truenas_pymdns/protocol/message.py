@@ -91,6 +91,9 @@ class MDNSMessage:
     - msg_id MUST be zero for multicast responses (RFC 6762 s18.1)
     - Responses MUST set QR and AA flags (RFC 6762 s6)
     - Queries from port 5353 use msg_id=0 (RFC 6762 s18.1)
+    - OPCODE is zero — only standard queries are carried over
+      multicast (RFC 6762 s18.3)
+    - RCODE is zero (RFC 6762 s18.11)
     """
     msg_id: int = 0
     flags: int = 0
@@ -113,6 +116,24 @@ class MDNSMessage:
     def is_truncated(self) -> bool:
         """True if the TC (truncated) flag is set (RFC 6762 s7.2)."""
         return bool(self.flags & MDNSFlags.TC)
+
+    @property
+    def opcode(self) -> int:
+        """The 4-bit OPCODE field (RFC 1035 s4.1.1).
+
+        Multicast DNS carries only standard queries, so a multicast
+        DNS message has OPCODE zero (RFC 6762 s18.3).
+        """
+        return (self.flags & MDNSFlags.OPCODE_MASK.value) >> 11
+
+    @property
+    def rcode(self) -> int:
+        """The 4-bit Response Code (RFC 1035 s4.1.1).
+
+        Multicast DNS messages carry a zero Response Code
+        (RFC 6762 s18.11).
+        """
+        return self.flags & MDNSFlags.RCODE_MASK.value
 
     # -- Wire format ----------------------------------------------------------
 

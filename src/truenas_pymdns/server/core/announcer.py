@@ -18,8 +18,8 @@ class Announcer:
     Sends ANNOUNCE_COUNT announcements at doubling intervals
     (1s, 2s, 4s).  Each record is announced with its own cache-flush
     bit — set on unique records, clear on shared DNS-SD PTRs — per
-    RFC 6762 §10.2 (docs/specs/rfc6762.txt:1919-1954: the cache-flush
-    bit MUST NOT be set on shared records).
+    RFC 6762 §10.2 (the cache-flush bit MUST NOT be set on shared
+    records).
     """
 
     def __init__(self, send_fn: Callable[[MDNSMessage], None]) -> None:

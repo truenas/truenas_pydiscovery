@@ -5,9 +5,10 @@ and optionally port 138 (RFC 1002 datagram/browse service).  Uses
 ``loop.add_reader()`` for async receive, direct ``sendto()`` for send.
 
 Mirrors Samba 4.23's per-subnet socket layout in
-``source3/nmbd/nmbd_subnetdb.c:make_subnet()`` (lines 83-162).
+``make_subnet`` (``source3/nmbd/nmbd_subnetdb.c``).
 With the default ``nmbd bind explicit broadcast = yes``
-(``source3/param/loadparm.c:646``), Samba opens two sockets per
+(``loadparm_s3_init_globals`` in ``source3/param/loadparm.c``),
+Samba opens two sockets per
 port per interface:
 
 - ``nmb_sock`` bound to the interface's specific unicast IP
@@ -291,7 +292,7 @@ class NBNSTransport:
         than raising — matches Samba 4.23's ``make_subnet`` behaviour
         where a failed bind logs ``DBG_ERR`` and the subnet proceeds
         with whichever sockets opened successfully
-        (``source3/nmbd/nmbd_subnetdb.c:110-162``)."""
+        (``make_subnet`` in ``source3/nmbd/nmbd_subnetdb.c``)."""
         try:
             return self._create_specific_socket(bind_ip, port)
         except OSError as e:
@@ -307,7 +308,7 @@ class NBNSTransport:
         """Create a UDP socket bound to a specific (IP, port) pair.
 
         Mirrors Samba 4.23 ``open_socket_in_protocol``
-        (``source3/lib/util_sock.c:244-300``): ``SO_REUSEADDR`` +
+        (``source3/lib/util_sock.c``): ``SO_REUSEADDR`` +
         ``SO_REUSEPORT`` let this coexist with the global
         INADDR_ANY receiver; ``SO_BROADCAST`` lets the unicast
         socket emit subnet-broadcast sends.

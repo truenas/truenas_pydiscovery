@@ -3,7 +3,7 @@
 A responder MUST NOT answer when the querier's known answer carries
 an RR TTL at least half the true value, but MUST answer when the
 known answer has decayed below half — to refresh the querier before
-the record expires (docs/specs/rfc6762.txt:1243-1249).  Real
+the record expires (RFC 6762 §7.1).  Real
 registry + Responder, no mocks; scheduling into ``_pending`` is the
 observable "we will answer" signal.
 """

@@ -4,8 +4,7 @@ When a peer multicasts an answer for a record we also own, and the
 peer's TTL has dropped below 50 % of ours, we MUST schedule a
 re-announcement so caches don't expire the record prematurely.
 
-This covers ``MDNSServer._check_cooperating_responders`` at
-``server/server.py:356``.
+This covers ``MDNSServer._check_cooperating_responders``.
 """
 from __future__ import annotations
 

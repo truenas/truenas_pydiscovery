@@ -31,6 +31,8 @@ class TestLoadDaemonConfig:
         assert cfg.server.use_ipv6 is True
         assert cfg.server.cache_entries_max == 4096
         assert cfg.server.interfaces == []
+        # Avahi's option, but our default is exclusive (yes).
+        assert cfg.server.disallow_other_stacks is True
         assert cfg.reflector.enable_reflector is False
 
     def test_full_config(self, tmp_path):
@@ -42,6 +44,7 @@ class TestLoadDaemonConfig:
             interfaces = eth0, eth1
             use-ipv4 = yes
             use-ipv6 = no
+            disallow-other-stacks = no
             cache-entries-max = 2048
             ratelimit-interval-usec = 500000
             ratelimit-burst = 500
@@ -57,6 +60,7 @@ class TestLoadDaemonConfig:
         assert cfg.server.host_name == "truenas"
         assert cfg.server.use_ipv6 is False
         assert cfg.server.interfaces == ["eth0", "eth1"]
+        assert cfg.server.disallow_other_stacks is False
         assert cfg.server.cache_entries_max == 2048
         assert cfg.service_dir == Path("/custom/services")
         assert cfg.rundir == Path("/custom/run")
@@ -84,6 +88,7 @@ class TestGenerateDaemonConfig:
                 host_name="truenas",
                 interfaces=["eth0", "eth1"],
                 use_ipv6=False,
+                disallow_other_stacks=False,
                 cache_entries_max=2048,
             ),
             reflector=ReflectorConfig(enable_reflector=True),
@@ -98,6 +103,7 @@ class TestGenerateDaemonConfig:
         assert loaded.server.host_name == "truenas"
         assert loaded.server.interfaces == ["eth0", "eth1"]
         assert loaded.server.use_ipv6 is False
+        assert loaded.server.disallow_other_stacks is False
         assert loaded.server.cache_entries_max == 2048
         assert loaded.reflector.enable_reflector is True
 
@@ -108,6 +114,7 @@ class TestGenerateDaemonConfig:
         loaded = load_daemon_config(conf)
         assert loaded.server.domain_name == "local"
         assert loaded.server.use_ipv4 is True
+        assert loaded.server.disallow_other_stacks is True
 
 
 class TestServiceConfig:

@@ -185,3 +185,58 @@ class TestPeerAnswerWindowBlocksScheduling:
         finally:
             resp.cancel_all()
             loop.close()
+
+
+class TestDropPendingOnWithdrawal:
+    """RFC 6762 §9 conflict discard: a withdrawn record must leave
+    any deferred batch it was queued in, so the pending response
+    can't re-assert a record the registry already dropped."""
+
+    def test_drop_pending_removes_record_and_cancels_empty_batch(self):
+        reg = _registry_with(_a("h.local", "10.0.0.1"))
+        sent: list[MDNSMessage] = []
+        resp, loop = _responder_on_loop(reg, sent)
+        try:
+            query = MDNSMessage(
+                questions=[MDNSQuestion("h.local", QType.A)],
+            )
+            resp.handle_query(
+                query, ("10.0.0.50", 5353), interface_index=IFACE,
+            )
+            assert resp._pending
+            (_, _, handle, _), = resp._pending.values()
+
+            resp.drop_pending(reg.lookup("h.local", QType.A, IFACE))
+
+            assert resp._pending == {}
+            assert handle.cancelled()
+            assert sent == []
+        finally:
+            resp.cancel_all()
+            loop.close()
+
+    def test_drop_pending_keeps_unrelated_records(self):
+        r1 = _a("h.local", "10.0.0.1")
+        r2 = _a("h.local", "10.0.0.2")
+        reg = _registry_with(r1, r2)
+        sent: list[MDNSMessage] = []
+        resp, loop = _responder_on_loop(reg, sent)
+        try:
+            owned = reg.lookup("h.local", QType.A)
+            resp._schedule_response(list(owned), IFACE)
+            (pkey, (before, _, handle, _)), = resp._pending.items()
+            assert len(before) == 2
+
+            withdrawn = [
+                ow for ow in owned
+                if ow.record.data == r1.data
+            ]
+            resp.drop_pending(withdrawn)
+
+            after, _, _, _ = resp._pending[pkey]
+            assert len(after) == 1
+            assert after[0].record.data == r2.data
+            assert not handle.cancelled()
+        finally:
+            resp.cancel_all()
+            loop.close()

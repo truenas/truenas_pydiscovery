@@ -65,9 +65,10 @@ class Responder:
         self._send = send_fn
         self._unicast_send = unicast_send_fn
         self._registry = registry
-        # pkey -> (owned records, additionals, timer_handle)
+        # pkey -> (owned records, additionals, timer_handle, interface_index)
         self._pending: dict[str, tuple[
             list[OwnedRecord], list[MDNSRecord] | None, asyncio.TimerHandle,
+            int,
         ]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -92,15 +93,23 @@ class Responder:
             if not matching:
                 continue
 
-            # RFC 6762 s7.1: known-answer suppression
-            known_rdata = set()
+            # RFC 6762 §7.1 (docs/specs/rfc6762.txt:1243-1249): suppress
+            # our answer only when the querier's known answer carries an
+            # RR TTL at least half the true value.  If its cached copy
+            # has decayed below half we MUST still answer, to refresh
+            # the querier before the record expires.  Map each known
+            # rdata to the largest TTL the querier listed for it.
+            known_ttl: dict[bytes, int] = {}
             for ka in message.answers:
                 if ka.key.name.lower() == question.name.lower():
-                    known_rdata.add(ka.rdata_wire())
+                    w = ka.rdata_wire()
+                    if ka.ttl > known_ttl.get(w, -1):
+                        known_ttl[w] = ka.ttl
 
             eligible = [
                 ow for ow in matching
-                if ow.record.rdata_wire() not in known_rdata
+                if known_ttl.get(ow.record.rdata_wire(), -1)
+                < ow.record.ttl // 2
             ]
             if not eligible:
                 continue
@@ -129,7 +138,7 @@ class Responder:
                 # known-answer packets will arrive soon; defer 400-500
                 # ms to give them time to land before we respond.
                 self._schedule_response(
-                    eligible, additionals,
+                    eligible, interface_index, additionals,
                     truncated_query=message.is_truncated,
                 )
 
@@ -151,14 +160,20 @@ class Responder:
                     )
                     self._send(msg)
 
-    def suppress_if_answered(self, message: MDNSMessage) -> None:
+    def suppress_if_answered(
+        self, message: MDNSMessage, interface_index: int,
+    ) -> None:
         """RFC 6762 s7.4: distributed duplicate answer suppression.
 
-        For each peer answer, find owned records matching name, type
-        AND rdata (per-record, like mDNSResponder's
-        IdenticalResourceRecord and avahi's avahi_record_equal_no_ttl),
-        stamp their last_peer_answer timestamps, and remove them from
-        any pending batched response.
+        For each peer answer seen on *interface_index*, find owned
+        records matching name, type AND rdata (per-record, like
+        mDNSResponder's IdenticalResourceRecord and avahi's
+        avahi_record_equal_no_ttl), stamp their per-interface
+        last_peer_answer timestamps, and remove them from any pending
+        batched response.  The lookup is scoped to *interface_index*
+        so a peer answer on one link cannot suppress our response on
+        another (§7.4 is per-interface — the answer is only "seen" on
+        the link it arrived on).
         """
         now = time.monotonic()
         for rr in message.answers:
@@ -167,20 +182,22 @@ class Responder:
             # ``_identity`` (case-folded for PTR/SRV targets,
             # byte-exact for A/AAAA/TXT per their respective specs).
             matches = [
-                ow for ow in self._registry.lookup(rr.key.name, rr.key.rtype)
+                ow for ow in self._registry.lookup(
+                    rr.key.name, rr.key.rtype, interface_index,
+                )
                 if ow.record.data == rr.data
             ]
             if not matches:
                 continue
 
             for ow in matches:
-                ow.last_peer_answer = now
+                ow.last_peer_answer[interface_index] = now
 
             # Drop any matching records from pending batches; if a
             # batch becomes empty, cancel its timer.
             matched_ids = {id(ow) for ow in matches}
             empty_pkeys: list[str] = []
-            for pkey, (records, _additionals, handle) in self._pending.items():
+            for pkey, (records, _add, handle, _iface) in self._pending.items():
                 remaining = [
                     ow for ow in records if id(ow) not in matched_ids
                 ]
@@ -191,6 +208,7 @@ class Responder:
                         remaining,
                         self._pending[pkey][1],
                         handle,
+                        _iface,
                     )
                 else:
                     handle.cancel()
@@ -204,12 +222,13 @@ class Responder:
 
     def cancel_all(self) -> None:
         """Cancel all pending deferred responses."""
-        for _, _, handle in self._pending.values():
+        for _, _, handle, _iface in self._pending.values():
             handle.cancel()
         self._pending.clear()
 
     def _schedule_response(
         self, owned: list[OwnedRecord],
+        interface_index: int,
         additionals: list[MDNSRecord] | None = None,
         truncated_query: bool = False,
     ) -> None:
@@ -219,14 +238,18 @@ class Responder:
         now = time.monotonic()
 
         # Filter out records that fail rate limit or were recently
-        # answered by a peer (distributed duplicate suppression).
+        # answered by a peer (distributed duplicate suppression).  Both
+        # gates read this interface's timestamps only (RFC 6762 §6/§7.4
+        # are per-interface, docs/specs/rfc6762.txt:854-857).
         eligible: list[OwnedRecord] = []
         for ow in owned:
-            # RFC 6762 s6: 1-second per-record multicast rate limit
-            if now - ow.last_multicast < MULTICAST_RATE_LIMIT:
+            # RFC 6762 §6: 1-second per-record, per-interface rate limit
+            if now - ow.last_multicast.get(interface_index, 0.0) \
+                    < MULTICAST_RATE_LIMIT:
                 continue
-            # RFC 6762 s7.4: suppress if peer recently answered
-            if now - ow.last_peer_answer < _ANSWER_HISTORY_WINDOW:
+            # RFC 6762 §7.4: suppress if a peer answered on this iface
+            if now - ow.last_peer_answer.get(interface_index, 0.0) \
+                    < _ANSWER_HISTORY_WINDOW:
                 continue
             eligible.append(ow)
 
@@ -236,8 +259,15 @@ class Responder:
         pkey = "|".join(sorted(self._record_key(ow.record) for ow in eligible))
 
         if pkey in self._pending:
-            existing_records, _, _ = self._pending[pkey]
-            existing_records.extend(eligible)
+            existing_records, _, _, _ = self._pending[pkey]
+            # A record appears at most once per response (RFC 6762 §7.4;
+            # avahi avahi_record_list_push guards the same way): dedup by
+            # identity so a repeat query for the same records within the
+            # defer window doesn't emit each answer twice.
+            existing_ids = {id(ow) for ow in existing_records}
+            existing_records.extend(
+                ow for ow in eligible if id(ow) not in existing_ids
+            )
             return
 
         # RFC 6762 §7.2: when the inbound query has TC=1, wait
@@ -248,20 +278,21 @@ class Responder:
         else:
             delay = random.uniform(RESPONSE_DEFER_MIN, RESPONSE_DEFER_MAX)
         handle = self._loop.call_later(delay, self._send_pending, pkey)
-        self._pending[pkey] = (eligible, additionals, handle)
+        self._pending[pkey] = (eligible, additionals, handle, interface_index)
 
     def _send_pending(self, pkey: str) -> None:
         item = self._pending.pop(pkey, None)
         if item is None:
             return
-        owned, additionals, _ = item
+        owned, additionals, _, interface_index = item
 
         # Final suppression check — a peer may have answered while we
         # were waiting the 20-120ms jitter.
         now = time.monotonic()
         still_needed = [
             ow for ow in owned
-            if now - ow.last_peer_answer >= _ANSWER_HISTORY_WINDOW
+            if now - ow.last_peer_answer.get(interface_index, 0.0)
+            >= _ANSWER_HISTORY_WINDOW
         ]
 
         if not still_needed:
@@ -273,7 +304,7 @@ class Responder:
         self._send(msg)
 
         for ow in still_needed:
-            ow.last_multicast = now
+            ow.last_multicast[interface_index] = now
 
     def _collect_additionals(
         self, answers: list[MDNSRecord], interface_index: int,

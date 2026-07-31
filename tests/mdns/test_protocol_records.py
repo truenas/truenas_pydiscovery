@@ -249,3 +249,37 @@ class TestMDNSRecord:
         )
         # A(1) < AAAA(28), so r1 wins (negative)
         assert r1.lexicographic_cmp(r2) < 0
+
+    def _ptr(self, target: str) -> MDNSRecord:
+        return MDNSRecord(
+            key=MDNSRecordKey("_x._tcp.local", QType.PTR),
+            ttl=120,
+            data=PTRRecordData(target),
+        )
+
+    def test_lexicographic_cmp_ptr_honours_label_length_octet(self):
+        """RFC 6762 §8.2 compares raw uncompressed rdata bytes, so the
+        DNS label length octet is significant: ``z.local`` (first label
+        length 1) is lexicographically LESS than ``aa.local`` (length
+        2) even though the text 'z' > 'aa'.  A case-folded string
+        compare would order these backwards."""
+        z = self._ptr("z.local")
+        aa = self._ptr("aa.local")
+        # wire: z = 01 'z' ... vs aa = 02 'a''a' ... ; 0x01 < 0x02
+        assert z.lexicographic_cmp(aa) < 0
+        assert aa.lexicographic_cmp(z) > 0
+
+    def test_lexicographic_cmp_ptr_is_case_sensitive(self):
+        """§8.2 is a raw octet compare: 'Z'(0x5a) < 'a'(0x61)."""
+        upper = self._ptr("Zebra.local")
+        lower = self._ptr("apple.local")
+        assert upper.lexicographic_cmp(lower) < 0
+
+    def test_lexicographic_cmp_case_variant_ties(self):
+        """RFC 6762 §16: a case-variant of the same name is the SAME
+        record (§8.2.1 identical records → no conflict), so it ties
+        rather than feeding the case-sensitive byte comparison — this
+        is what keeps BCT §820 case flips from provoking a rename."""
+        assert self._ptr("Host.local").lexicographic_cmp(
+            self._ptr("HOST.LOCAL")
+        ) == 0

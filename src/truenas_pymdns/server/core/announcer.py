@@ -16,7 +16,10 @@ class Announcer:
     """Sends announcement packets after successful probing.
 
     Sends ANNOUNCE_COUNT announcements at doubling intervals
-    (1s, 2s, 4s).  Records have cache-flush bit set.
+    (1s, 2s, 4s).  Each record is announced with its own cache-flush
+    bit — set on unique records, clear on shared DNS-SD PTRs — per
+    RFC 6762 §10.2 (docs/specs/rfc6762.txt:1919-1954: the cache-flush
+    bit MUST NOT be set on shared records).
     """
 
     def __init__(self, send_fn: Callable[[MDNSMessage], None]) -> None:
@@ -34,15 +37,13 @@ class Announcer:
         """
         delay = ANNOUNCE_INTERVAL_INITIAL
         for i in range(count):
-            # Build response with cache-flush bit
-            announce_records = []
-            for r in records:
-                ar = MDNSRecord(
-                    key=r.key, ttl=r.ttl, data=r.data, cache_flush=True,
-                )
-                announce_records.append(ar)
-
-            msg = MDNSMessage.build_response(announce_records)
+            # RFC 6762 §10.2: the cache-flush bit is carried per record
+            # (set on unique records by add_service/add_address, clear
+            # on shared DNS-SD PTRs).  Announce them as registered —
+            # forcing the bit on would flush neighbours' other instances
+            # of a shared service type from their caches (§10.2:
+            # "MUST NOT ever be set in any shared resource record").
+            msg = MDNSMessage.build_response(records)
             self._send(msg)
             logger.debug("Announcement %d/%d sent (%d records)",
                          i + 1, count, len(records))

@@ -8,8 +8,6 @@ from ..core.entry_group import EntryGroup, OwnedRecord
 
 logger = logging.getLogger(__name__)
 
-_META_QUERY_NAME = "_services._dns-sd._udp.local"
-
 
 class ServiceRegistry:
     """Stores all records this server is authoritative for.
@@ -42,16 +40,16 @@ class ServiceRegistry:
     ) -> list[OwnedRecord]:
         """Find records matching name and type.
 
-        Handles ANY type and the _services._dns-sd._udp.local meta-query.
-        Filters by interface if the entry group is interface-bound.
+        ANY matches every type.  Filters by ``EntryGroup.publishes_on``
+        when *interface_index* is given.
         """
         name_lower = name.lower()
         results: list[OwnedRecord] = []
 
         for group in self._groups:
-            if interface_index is not None and group.interfaces is not None:
-                if interface_index not in group.interfaces:
-                    continue
+            if (interface_index is not None
+                    and not group.publishes_on(interface_index)):
+                continue
 
             for ow in group.owned_records:
                 if ow.record.key.name != name_lower:
@@ -67,22 +65,8 @@ class ServiceRegistry:
         """Return all registered records, optionally filtered by interface."""
         results: list[OwnedRecord] = []
         for group in self._groups:
-            if interface_index is not None and group.interfaces is not None:
-                if interface_index not in group.interfaces:
-                    continue
+            if (interface_index is not None
+                    and not group.publishes_on(interface_index)):
+                continue
             results.extend(group.owned_records)
         return results
-
-    def has_name(self, name: str) -> bool:
-        """Return True if any registered record matches the given name."""
-        name_lower = name.lower()
-        for group in self._groups:
-            for ow in group.owned_records:
-                if ow.record.key.name == name_lower:
-                    return True
-        return False
-
-    @property
-    def groups(self) -> list[EntryGroup]:
-        """Return a copy of the registered entry groups."""
-        return list(self._groups)

@@ -180,12 +180,7 @@ class MDNSServer(ConfigDaemon):
         # Register host address records (discovered from interfaces)
         self._register_host_addresses()
 
-        # Probe and announce
-        # Snapshot: a probe conflict raised mid-loop schedules
-        # ``_resolve_conflict``, and a host-name conflict there
-        # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
-        for group in list(self._entry_groups):
-            await self._probe_and_announce(group)
+        await self._probe_and_announce_all()
 
         # RFC 6762 §8.3 / §13 + BCT II.17 "HOT-PLUGGING": listen for
         # link state changes and re-probe all affected groups when a
@@ -216,17 +211,7 @@ class MDNSServer(ConfigDaemon):
             task.cancel()
         self._conflict_tasks.clear()
 
-        for ifstate in self._interfaces.values():
-            owned = self._registry.get_all_records(ifstate.iface.index)
-            logger.info(
-                "Goodbye: %d records for interface %s",
-                len(owned), ifstate.iface.name,
-            )
-            if owned:
-                send_goodbye(
-                    ifstate.transport.send_message,
-                    [ow.record for ow in owned],
-                )
+        self._goodbye_all_interfaces()
 
         for ifstate in self._interfaces.values():
             await ifstate.stop()
@@ -263,15 +248,11 @@ class MDNSServer(ConfigDaemon):
 
         transport = ifstate.transport
 
-        def _unicast_send(
-            msg: MDNSMessage, addr: tuple,
-            _t: MDNSTransport = transport,
-        ) -> None:
-            _t.send_message(msg, addr)
-
+        # ``MDNSTransport.send_message`` fills both Responder roles:
+        # multicast with no address, unicast when one is given.
         ifstate.responder = Responder(
             transport.send_message,
-            _unicast_send,
+            transport.send_message,
             self._registry,
         )
         ifstate.responder.start(loop)
@@ -333,30 +314,45 @@ class MDNSServer(ConfigDaemon):
         for svc in services:
             key = ServiceKey.from_config(svc, self._hostname, self._fqdn)
             if key in self._service_groups:
-                # Two .conf files defining the same service would
-                # otherwise register the same records twice; the
-                # second copy contributes nothing to the wire and
-                # breaks the delta reload's service-key index.
-                logger.warning(
-                    "Duplicate service %s.%s on port %d — skipping",
-                    key.instance_name, key.service_type, key.port,
-                )
+                self._warn_duplicate_service(key)
                 continue
-            iface_indexes = None
-            if svc.interfaces:
-                iface_indexes = []
-                for name in svc.interfaces:
-                    iface = await loop.run_in_executor(
-                        None, resolve_interface, name,
-                    )
-                    if iface is not None:
-                        iface_indexes.append(iface.index)
+            await self._register_service_group(key, svc)
 
-            group = service_to_entry_group(
-                svc, self._hostname, self._fqdn, iface_indexes,
-            )
-            self._entry_groups.append(group)
-            self._service_groups[key] = group
+    async def _register_service_group(
+        self, key: ServiceKey, svc: ServiceConfig,
+    ) -> EntryGroup:
+        """Build *svc*'s entry group and register it under *key* in
+        ``_entry_groups`` / ``_service_groups``."""
+        loop = asyncio.get_running_loop()
+        iface_indexes = None
+        if svc.interfaces:
+            iface_indexes = []
+            for name in svc.interfaces:
+                iface = await loop.run_in_executor(
+                    None, resolve_interface, name,
+                )
+                if iface is not None:
+                    iface_indexes.append(iface.index)
+
+        group = service_to_entry_group(
+            svc, self._hostname, self._fqdn, iface_indexes,
+        )
+        self._entry_groups.append(group)
+        self._service_groups[key] = group
+        return group
+
+    @staticmethod
+    def _warn_duplicate_service(key: ServiceKey) -> None:
+        """Log a dropped duplicate services.d definition.
+
+        Two .conf files defining the same service would register the
+        same records twice; the second copy contributes nothing to
+        the wire and breaks the delta reload's service-key index.
+        """
+        logger.warning(
+            "Duplicate service %s.%s on port %d — skipping",
+            key.instance_name, key.service_type, key.port,
+        )
 
     def _register_host_addresses(self) -> None:
         """Create A/AAAA records from discovered interface addresses.
@@ -404,6 +400,32 @@ class MDNSServer(ConfigDaemon):
             self._entry_groups.append(group)
             self._host_groups.append(group)
 
+    def _goodbye_all_interfaces(self) -> None:
+        """Multicast TTL=0 goodbyes for every registered record, per
+        interface (RFC 6762 §10.1)."""
+        for ifstate in self._interfaces.values():
+            owned = self._registry.get_all_records(ifstate.iface.index)
+            if not owned:
+                continue
+            logger.info(
+                "Goodbye: %d records for interface %s",
+                len(owned), ifstate.iface.name,
+            )
+            send_goodbye(
+                ifstate.transport.send_message,
+                [ow.record for ow in owned],
+            )
+
+    async def _probe_and_announce_all(self) -> None:
+        """Probe and announce every entry group.
+
+        Walks a snapshot: a probe conflict raised mid-loop schedules
+        ``_resolve_conflict``, and a host-name conflict there replaces
+        ``_entry_groups`` wholesale (RFC 6762 §9).
+        """
+        for group in list(self._entry_groups):
+            await self._probe_and_announce(group)
+
     async def _probe_and_announce(
         self, group: EntryGroup,
         announce_count: int = ANNOUNCE_COUNT,
@@ -433,8 +455,7 @@ class MDNSServer(ConfigDaemon):
         group.set_state(EntryGroupState.REGISTERING)
 
         for ifstate in self._interfaces.values():
-            if (group.interfaces is not None
-                    and ifstate.iface.index not in group.interfaces):
+            if not group.publishes_on(ifstate.iface.index):
                 continue
             if ifstate.prober is None:
                 continue
@@ -451,8 +472,7 @@ class MDNSServer(ConfigDaemon):
         self._registry.add_group(group)
 
         for ifstate in self._interfaces.values():
-            if (group.interfaces is not None
-                    and ifstate.iface.index not in group.interfaces):
+            if not group.publishes_on(ifstate.iface.index):
                 continue
             if ifstate.announcer:
                 task = ifstate.announcer.schedule_announce(
@@ -530,7 +550,7 @@ class MDNSServer(ConfigDaemon):
             if old_primary is None or new_primary is None:
                 logger.error(
                     "Cannot resolve conflict for group with no "
-                    "SRV/A/AAAA records — giving up"
+                    "SRV records — giving up"
                 )
                 continue
             logger.warning(
@@ -548,12 +568,10 @@ class MDNSServer(ConfigDaemon):
             obsolete = _obsolete_shared_records(pre_records, old_primary)
             if obsolete:
                 for ifstate in self._interfaces.values():
-                    if (group.interfaces is not None
-                            and ifstate.iface.index not in group.interfaces):
+                    if not group.publishes_on(ifstate.iface.index):
                         continue
                     send_goodbye(ifstate.transport.send_message, obsolete)
             group.set_state(EntryGroupState.UNCOMMITTED)
-            group.set_state(EntryGroupState.REGISTERING)
             await self._probe_and_announce(group)
             break
 
@@ -682,6 +700,9 @@ class MDNSServer(ConfigDaemon):
         self, message: MDNSMessage, ifindex: int,
     ) -> None:
         """RFC 6762 s6.6: re-announce if peer's TTL < 50% of ours."""
+        ifstate = self._interfaces.get(ifindex)
+        if ifstate is None or ifstate.announcer is None:
+            return
         for rr in message.answers:
             our_owned = self._registry.lookup(
                 rr.key.name, rr.key.rtype, ifindex,
@@ -694,9 +715,7 @@ class MDNSServer(ConfigDaemon):
                 # IP_MULTICAST_LOOP.
                 if ow.record.data == rr.data:
                     if rr.ttl < ow.record.ttl // 2:
-                        ifstate = self._interfaces.get(ifindex)
-                        if ifstate and ifstate.announcer:
-                            ifstate.announcer.schedule_announce([ow.record])
+                        ifstate.announcer.schedule_announce([ow.record])
 
     def _check_established_conflicts(
         self, message: MDNSMessage, ifindex: int, source: tuple = (),
@@ -778,8 +797,7 @@ class MDNSServer(ConfigDaemon):
         for group in self._entry_groups:
             if group.state != EntryGroupState.ESTABLISHED:
                 continue
-            if (group.interfaces is not None
-                    and ifindex not in group.interfaces):
+            if not group.publishes_on(ifindex):
                 continue
             matched = any(
                 ow.record.cache_flush and ow.should_probe and (
@@ -864,8 +882,7 @@ class MDNSServer(ConfigDaemon):
             if not group.records:
                 continue
             for ifstate in self._interfaces.values():
-                if (group.interfaces is not None
-                        and ifstate.iface.index not in group.interfaces):
+                if not group.publishes_on(ifstate.iface.index):
                     continue
                 if ifstate.announcer:
                     task = ifstate.announcer.schedule_announce(
@@ -942,10 +959,7 @@ class MDNSServer(ConfigDaemon):
         for group in self._entry_groups:
             if group.state != EntryGroupState.ESTABLISHED:
                 continue
-            if (
-                group.interfaces is not None
-                and ifindex not in group.interfaces
-            ):
+            if not group.publishes_on(ifindex):
                 continue
             affected.append(group)
         if not affected:
@@ -983,7 +997,7 @@ class MDNSServer(ConfigDaemon):
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
 
-        Picks one of three paths based on what actually changed since
+        Picks one of two paths based on what actually changed since
         the previous ``apply_config``:
 
         * **full rebuild** — interfaces, IPv4/IPv6 toggle, or the
@@ -1038,13 +1052,7 @@ class MDNSServer(ConfigDaemon):
         self._conflict_tasks.clear()
 
         async with self._get_rebuild_lock():
-            for ifstate in self._interfaces.values():
-                owned = self._registry.get_all_records(ifstate.iface.index)
-                if owned:
-                    send_goodbye(
-                        ifstate.transport.send_message,
-                        [ow.record for ow in owned],
-                    )
+            self._goodbye_all_interfaces()
 
             # Cancel per-interface schedulers and tasks before dropping
             # the ifstate refs — otherwise their TimerHandles and Tasks
@@ -1072,11 +1080,7 @@ class MDNSServer(ConfigDaemon):
             await self._load_static_services()
             self._register_host_addresses()
 
-            # Snapshot: a probe conflict raised mid-loop schedules
-            # ``_resolve_conflict``, and a host-name conflict there
-            # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
-            for group in list(self._entry_groups):
-                await self._probe_and_announce(group)
+            await self._probe_and_announce_all()
 
             self._wake.set()
 
@@ -1125,13 +1129,7 @@ class MDNSServer(ConfigDaemon):
                 ifstate.responder.cancel_all()
         self._announce_tasks.clear()
 
-        for ifstate in self._interfaces.values():
-            owned = self._registry.get_all_records(ifstate.iface.index)
-            if owned:
-                send_goodbye(
-                    ifstate.transport.send_message,
-                    [ow.record for ow in owned],
-                )
+        self._goodbye_all_interfaces()
 
         for group in self._entry_groups:
             self._registry.remove_group(group)
@@ -1141,11 +1139,7 @@ class MDNSServer(ConfigDaemon):
         await self._load_static_services()
         self._register_host_addresses()
 
-        # Snapshot: a probe conflict raised mid-loop schedules
-        # ``_resolve_conflict``, and a host-name conflict there
-        # replaces ``_entry_groups`` wholesale (RFC 6762 §9).
-        for group in list(self._entry_groups):
-            await self._probe_and_announce(group)
+        await self._probe_and_announce_all()
 
         self._wake.set()
 
@@ -1210,11 +1204,7 @@ class MDNSServer(ConfigDaemon):
         for svc in services:
             key = ServiceKey.from_config(svc, self._hostname, self._fqdn)
             if key in new_key_to_svc:
-                logger.warning(
-                    "Duplicate service %s.%s on port %d in services.d "
-                    "— skipping duplicate",
-                    key.instance_name, key.service_type, key.port,
-                )
+                self._warn_duplicate_service(key)
                 continue
             new_key_to_svc[key] = svc
 
@@ -1234,8 +1224,10 @@ class MDNSServer(ConfigDaemon):
 
         for key in to_remove:
             group = self._service_groups.pop(key)
-            if group in self._entry_groups:
+            try:
                 self._entry_groups.remove(group)
+            except ValueError:
+                pass
             # Cancel this group's in-flight announce sequence before we
             # goodbye it, so a straggler tick can't re-multicast the
             # records we're about to withdraw (RFC 6762 §10.1).  Scoped
@@ -1262,10 +1254,7 @@ class MDNSServer(ConfigDaemon):
                 # _resolve_conflict so peers on other interfaces
                 # aren't spammed with records they never cached.
                 for ifstate in self._interfaces.values():
-                    if (
-                        group.interfaces is not None
-                        and ifstate.iface.index not in group.interfaces
-                    ):
+                    if not group.publishes_on(ifstate.iface.index):
                         continue
                     send_goodbye(
                         ifstate.transport.send_message, to_goodbye,
@@ -1273,22 +1262,9 @@ class MDNSServer(ConfigDaemon):
             self._registry.remove_group(group)
 
         for key in to_add:
-            svc = new_key_to_svc[key]
-            iface_indexes = None
-            if svc.interfaces:
-                iface_indexes = []
-                for name in svc.interfaces:
-                    iface = await loop.run_in_executor(
-                        None, resolve_interface, name,
-                    )
-                    if iface is not None:
-                        iface_indexes.append(iface.index)
-
-            group = service_to_entry_group(
-                svc, self._hostname, self._fqdn, iface_indexes,
+            group = await self._register_service_group(
+                key, new_key_to_svc[key],
             )
-            self._entry_groups.append(group)
-            self._service_groups[key] = group
             await self._probe_and_announce(group)
 
         self._wake.set()
@@ -1401,11 +1377,6 @@ def _rename_group(group: EntryGroup) -> tuple[str | None, str | None]:
         if ow.record.key.rtype == QType.SRV:
             primary = ow.record.key.name
             break
-    if primary is None:
-        for ow in group.owned_records:
-            if ow.record.key.rtype in (QType.A, QType.AAAA):
-                primary = ow.record.key.name
-                break
     if primary is None:
         return (None, None)
 

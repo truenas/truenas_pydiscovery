@@ -22,7 +22,7 @@ from truenas_pymdns.protocol.records import (
 )
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class OwnedRecord:
     """Server-side wrapper around an authoritative MDNSRecord.
 
@@ -65,6 +65,11 @@ class OwnedRecord:
     probes its reverse PTRs and reserves the flag for its localhost
     entries, so the precedent followed here is RFC 6762 §8.1 plus
     mDNSResponder.
+
+    Equality and hashing are object identity (``eq=False``): a
+    wrapper stands for one registration, and the withdrawal paths
+    collect wrappers in sets and remove them from lists by that
+    identity.
     """
     record: MDNSRecord
     last_multicast: dict[int, float] = field(default_factory=dict)
@@ -86,6 +91,17 @@ class EntryGroup:
         self._records: list[OwnedRecord] = []
         self._on_state_change = on_state_change
         self.interfaces: list[int] | None = None  # None = all interfaces
+
+    def publishes_on(self, interface_index: int) -> bool:
+        """True if this group publishes on *interface_index*.
+
+        An unbound group (``interfaces`` is None) publishes on every
+        interface.
+        """
+        return (
+            self.interfaces is None
+            or interface_index in self.interfaces
+        )
 
     @property
     def records(self) -> list[MDNSRecord]:
@@ -229,21 +245,20 @@ class EntryGroup:
                 cache_flush=True,
             ), should_probe=False)
 
-    def remove_record(self, ow: OwnedRecord) -> bool:
-        """Withdraw *ow* from this group; True if it was a member.
+    def remove_record(self, owned_record: OwnedRecord) -> bool:
+        """Withdraw *owned_record* from this group; True if it was a
+        member.
 
-        Matched by object identity, not equality: ``OwnedRecord`` is a
-        dataclass whose generated ``==`` is field-wise, so an
-        equal-valued wrapper in another group must not be mistaken for
-        this one.  Used for conflict withdrawal of an established
-        record (RFC 6762 §9), so unlike ``add_record`` it carries no
-        state restriction.
+        ``OwnedRecord`` equality is object identity, so this removes
+        exactly the given wrapper.  Used for conflict withdrawal of an
+        established record (RFC 6762 §9), so unlike ``add_record`` it
+        carries no state restriction.
         """
-        for i, cand in enumerate(self._records):
-            if cand is ow:
-                del self._records[i]
-                return True
-        return False
+        try:
+            self._records.remove(owned_record)
+        except ValueError:
+            return False
+        return True
 
     def set_state(self, state: EntryGroupState) -> None:
         """Transition to a new state and invoke the state-change callback."""

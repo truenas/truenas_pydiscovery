@@ -6,11 +6,8 @@ addresses that are not valid on that interface (such as addresses
 that may be configured on the host's other interfaces)", restated as
 a MUST for multihomed hosts in §14.
 
-On a multihomed host the practical failure is a client on the LAN
-learning an address that only exists on an isolated link — a dedicated
-replication DAC, a storage VLAN — and stalling when it picks that one
-to connect to.  Scoping is carried by ``EntryGroup.interfaces``, which
-``ServiceRegistry.lookup`` already honours, so these tests cover both
+Scoping is carried by ``EntryGroup.interfaces``, which
+``ServiceRegistry.lookup`` honours, so these tests cover both
 halves: that ``_register_host_addresses`` builds one bound group per
 interface, and that the registry and responder then keep direct
 answers *and* DNS-SD additionals on their own link.
@@ -211,10 +208,9 @@ class TestResponderScoping:
 
         This is the path Finder uses: a client browsing ``_smb._tcp``
         takes the connect address straight out of the additional
-        records attached to the PTR answer, so an unreachable address
-        handed out here is what makes ``smb://nas.local``
-        intermittently hang.  Apple applies the same interface filter
-        to additionals (``AddAdditionalsToResponseList``).
+        records attached to the PTR answer.  mDNSResponder applies
+        the same interface filter to additionals
+        (``AddAdditionalsToResponseList``).
         """
         server, _loop = multihomed
         server._register_host_addresses()

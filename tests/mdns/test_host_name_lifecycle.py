@@ -5,19 +5,16 @@ fixed for the life of the process, with exactly one thing allowed to
 move it: RFC 6762 §9 conflict resolution, where the loser of a probe
 "MUST cease using the name, and reconfigure".
 
-SIGHUP deliberately does not.  Re-deriving the name from config on
-every reload would silently revert a name the daemon had legitimately
-won, putting it back onto the contested name and re-colliding.
-Middleware already restarts rather than reloads for a hostname edit,
-so nothing depends on the reload path carrying it.
+SIGHUP deliberately does not: a reload must not revert a name won
+through conflict resolution.  Middleware restarts rather than
+reloads for a hostname edit, so nothing depends on the reload path
+carrying it.
 
-Ceasing to use a name means more than moving the A/AAAA records: the
-host FQDN is also every service's SRV target, and a stale target
-points clients at the host that just won the name — they resolve it
-and connect to the wrong machine rather than failing.  So the whole
-registry re-registers, which also gives §14 ("in the event of a name
-conflict on *any* interface, a host should configure a new host name")
-for free.
+Ceasing to use a name covers more than the A/AAAA records: the host
+FQDN is also every service's SRV target and, for ``%h`` instances,
+part of the instance name.  So the whole registry re-registers,
+which also gives §14 ("in the event of a name conflict on *any*
+interface, a host should configure a new host name") for free.
 """
 from __future__ import annotations
 
@@ -167,12 +164,9 @@ class TestSighupDoesNotRename:
         assert _srv_targets(server) == {"nas-2.local"}
 
     def test_a_won_name_survives_a_reload(self, server_with_service):
-        """The regression this design exists to prevent.
-
-        A daemon that renamed itself to settle a conflict must not be
-        put back on the contested name by an unrelated reload — a
-        services.d edit, an interface change, anything.
-        """
+        """A daemon that renamed itself to settle a conflict must not
+        be put back on the contested name by an unrelated reload — a
+        services.d edit, an interface change, anything."""
         server, loop = server_with_service
         server._host_groups[0].set_state(EntryGroupState.COLLISION)
         loop.run_until_complete(server._resolve_conflict([]))
@@ -317,9 +311,10 @@ class TestRenameConvergence:
     """RFC 6762 §9: "Probe again, and repeat as necessary until a
     unique name is found."
 
-    Both references re-fire the rename on every conflict — Apple's
-    ``mDNS_HostNameCallback`` runs ``IncrementLabelSuffix`` +
-    ``mDNS_SetFQDN`` again each time, avahi re-enters
+    Both references re-fire the rename on every conflict —
+    mDNSResponder's ``mDNS_HostNameCallback`` runs
+    ``IncrementLabelSuffix`` + ``mDNS_SetFQDN`` again each time,
+    avahi re-enters
     ``AVAHI_SERVER_COLLISION`` and picks another alternative name — so
     a renamed-to name that is *also* taken must lead to a third name,
     never to a wedged half-registered state.
@@ -499,8 +494,8 @@ class TestRenameReloadSerialization:
 class TestRenameRestartCap:
     """RFC 6762 §9 step 5: "After one minute of probing, if the
     Multicast DNS responder has been unable to find any unused name,
-    it should log an error message" — and Apple bounds the same
-    retry with ``MAX_PROBE_RESTARTS``.  A peer defending every
+    it should log an error message" — and mDNSResponder bounds the
+    same retry with ``MAX_PROBE_RESTARTS``.  A peer defending every
     candidate name must not keep the rename loop goodbyeing and
     re-probing the whole registry forever."""
 
@@ -539,10 +534,10 @@ class TestRenameRestartCap:
 
             state.prober = Prober(defend_everything, server._on_conflict)
 
-            # The budget persists across calls (Apple's per-record
-            # ``ProbeRestartCount`` model); spend all but one attempt
-            # so the defended rename hits the cap on its first
-            # rebuild.
+            # The budget persists across calls (mDNSResponder's
+            # per-record ``ProbeRestartCount`` model); spend all but
+            # one attempt so the defended rename hits the cap on its
+            # first rebuild.
             server._rename_restarts = MAX_PROBE_RESTARTS - 1
 
             async def scenario() -> None:

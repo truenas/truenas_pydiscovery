@@ -385,7 +385,7 @@ class MDNSRecord:
     created_at: float = 0.0
 
     def __eq__(self, other: object) -> bool:
-        """RFC 6762 / Apple ``IdenticalResourceRecord``
+        """RFC 6762 / mDNSResponder ``IdenticalResourceRecord``
         (mDNSCore/DNSCommon.h:317) identity: two records are
         equal iff their name, class, type, and rdata match.
         TTL, cache-flush, and scheduling state are metadata —

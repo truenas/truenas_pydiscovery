@@ -133,12 +133,12 @@ class MDNSServer(ConfigDaemon):
         # which re-checks the host groups after every rebuild and
         # renames again while any is still in COLLISION.
         self._rehoming = False
-        # Restart budget for the §9 host rename, mirroring Apple's
-        # persistent per-record ``ProbeRestartCount``: it survives
-        # across ``_rename_host_after_conflict`` calls because the
-        # losing probe of a capped run queues one more conflict task,
-        # which must not restart the loop with a fresh budget.  Reset
-        # on convergence and by ``_full_rebuild_reload``.
+        # Restart budget for the §9 host rename, mirroring
+        # mDNSResponder's persistent per-record ``ProbeRestartCount``:
+        # it survives across ``_rename_host_after_conflict`` calls
+        # because the losing probe of a capped run queues one more
+        # conflict task, which must not restart the loop with a fresh
+        # budget.  Reset on convergence and by ``_full_rebuild_reload``.
         self._rename_restarts = 0
         # Serializes the whole-registry mutation paths — full
         # rebuild, service delta, and the §9 rename's re-register —
@@ -371,7 +371,7 @@ class MDNSServer(ConfigDaemon):
         MUST for multihomed hosts in §14.
 
         Binding at the group level is what makes that hold everywhere:
-        ``ServiceRegistry.lookup`` already filters by
+        ``ServiceRegistry.lookup`` filters by
         ``group.interfaces``, so direct answers, the SRV additionals a
         DNS-SD browse pulls in, probes, announcements and goodbyes all
         inherit the scoping from this one assignment.
@@ -561,14 +561,10 @@ class MDNSServer(ConfigDaemon):
         """RFC 6762 §9: we lost the probe for our own host name.
 
         §9 says the loser "MUST cease using the name, and reconfigure".
-        Ceasing means more than moving the A/AAAA records.  The host
-        FQDN is also every service's SRV target and, for
-        ``instance_name = %h``, part of the instance name — so the
-        whole registry has to come back under the new name.  Leaving
-        SRV targets on the old name is worse than a failed lookup: that
-        name now belongs to the host that just won it, so clients
-        following the SRV would resolve it and connect to the wrong
-        machine with no error anywhere.
+        The conceded name now belongs to the winning host, and it is
+        more than the A/AAAA key: it is also every service's SRV
+        target and, for ``instance_name = %h``, part of the instance
+        name — so the whole registry comes back under the new name.
 
         Re-registering everything also satisfies §14 ("In the event of
         a name conflict on *any* interface, a host should configure a
@@ -595,9 +591,10 @@ class MDNSServer(ConfigDaemon):
         The rename loops until the probes for the new host groups come
         back clean, per §9: "Probe again, and repeat as necessary
         until a unique name is found."  Both references re-fire the
-        rename on every conflict — Apple's ``mDNS_HostNameCallback``
-        runs ``IncrementLabelSuffix`` + ``mDNS_SetFQDN`` again each
-        time, avahi re-enters ``AVAHI_SERVER_COLLISION`` and picks
+        rename on every conflict — mDNSResponder's
+        ``mDNS_HostNameCallback`` runs ``IncrementLabelSuffix`` +
+        ``mDNS_SetFQDN`` again each time, avahi re-enters
+        ``AVAHI_SERVER_COLLISION`` and picks
         another ``avahi_alternative_host_name``.  Here a conflict
         against the renamed-to name surfaces as a rebuilt host group
         left in COLLISION (its nested rename attempt was dropped by
@@ -612,8 +609,9 @@ class MDNSServer(ConfigDaemon):
         later conflict-driven call no-ops instead of renaming
         forever.  §9 step 5 says a responder that cannot find an
         unused name "should log an error message to inform the user
-        or operator of this fact", and Apple bounds the same retry
-        with ``MAX_PROBE_RESTARTS`` against the record's persistent
+        or operator of this fact", and mDNSResponder bounds the same
+        retry with ``MAX_PROBE_RESTARTS`` against the record's
+        persistent
         restart count (``mDNSCoreReceiveResponse``).  The budget has
         to outlive one call: the losing probe of the final attempt
         queues one more conflict task, which would otherwise restart
@@ -719,8 +717,8 @@ class MDNSServer(ConfigDaemon):
         ``RecordProbeFailure`` increments the rate-limit counter.
 
         A conflict against a record that skipped probing (§8.1,
-        ``should_probe`` False) takes Apple's other branch instead:
-        the record is discarded, not re-probed — see
+        ``should_probe`` False) takes mDNSResponder's other branch
+        instead: the record is discarded, not re-probed — see
         ``_discard_known_unique_conflict``.
         """
         # Collect (name_lower, rtype) pairs whose peer rdata differs
@@ -747,10 +745,10 @@ class MDNSServer(ConfigDaemon):
         for rr in message.answers:
             # RFC 6762 §10.1: TTL=0 is a goodbye — a withdrawal, not
             # an assertion — so different rdata in one is a peer
-            # retracting its own record, not claiming ours.  Apple
-            # gates identically (``rroriginalttl > 0`` before
-            # ``PacketRRConflict``), and avahi ignores goodbyes that
-            # match none of its own records.
+            # retracting its own record, not claiming ours.
+            # mDNSResponder gates identically (``rroriginalttl > 0``
+            # before ``PacketRRConflict``), and avahi ignores
+            # goodbyes that match none of its own records.
             if rr.ttl == 0:
                 continue
             owned = self._registry.lookup(
@@ -831,23 +829,22 @@ class MDNSServer(ConfigDaemon):
         discard our record to avoid continued conflicts (as we do for
         a conflict on our Unique records) and get on with life."
 
-        No goodbye is sent: per Apple's ``mDNS_Deregister_internal``
-        on ``mDNS_Dereg_conflict``, TTL=0 withdrawal is for shared
+        No goodbye is sent: per mDNSResponder's
+        ``mDNS_Deregister_internal`` on ``mDNS_Dereg_conflict``,
+        TTL=0 withdrawal is for shared
         records only — the peer's own cache-flush announcements are
         what correct peer caches.  A later rebuild (host rename,
         reload) re-publishes the record; if the underlying address
         conflict is still there, the peer's next answer discards it
         again.
 
-        Removing the record from its group is not enough to stop
-        asserting it: an in-flight announce task holds a pre-removal
-        snapshot of ``group.records``, and a deferred responder batch
-        may hold the record too — stragglers would keep re-asserting
-        the conceded record with the cache-flush bit for seconds
-        after the discard (RFC 6762 §8.4 / §10.1).  Both are
-        dropped; the group's surviving records then get a fresh
-        announce sequence, keeping them at §8.3's "at least two
-        unsolicited responses".
+        The record is also dropped from every path that holds a
+        pre-removal reference and could keep asserting it after the
+        discard (RFC 6762 §8.4 / §10.1): in-flight announce tasks,
+        which snapshot ``group.records``, are cancelled, and deferred
+        responder batches shed it.  The group's surviving records
+        then get a fresh announce sequence, keeping them at §8.3's
+        "at least two unsolicited responses".
         """
         touched: list[EntryGroup] = []
         for ow in owned:
@@ -892,7 +889,7 @@ class MDNSServer(ConfigDaemon):
         guards against stale echoed packets from the cable
         transition; a longer 5s delay plus single-announcement mode
         kicks in if this interface has re-registered within
-        ``LINK_FLAP_WINDOW`` (Apple: *"In the case of a flapping
+        ``LINK_FLAP_WINDOW`` (mDNSResponder: *"In the case of a flapping
         interface, we pause for five seconds, and reduce the
         announcement count to one packet."*, ``mDNS.c:14262``).
 
@@ -1002,14 +999,11 @@ class MDNSServer(ConfigDaemon):
         a reload path.  The name we answer to is fixed for the life of
         the process: it is established by probing at startup and may
         then be moved only by RFC 6762 §9 conflict resolution, whose
-        result nothing must silently revert.  Re-deriving it from
-        config on every SIGHUP would do exactly that, and would put a
-        host that had legitimately renamed itself back onto the
-        contested name.  Changing the configured name is a service
-        restart, which middleware already issues — a hostname edit
-        goes through ``network.configuration.do_update``, whose
-        ``toggle_announcement`` call restarts the daemon rather than
-        reloading it."""
+        result a reload must not revert.  Changing the configured name
+        is a service restart, which middleware already issues — a
+        hostname edit goes through ``network.configuration.do_update``,
+        whose ``toggle_announcement`` call restarts the daemon rather
+        than reloading it."""
         prev = self._prev_config
         cur = self._config
 

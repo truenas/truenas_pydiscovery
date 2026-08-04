@@ -93,10 +93,8 @@ class TestApplyConfig:
         not follow it.
 
         The name is established by probing at startup and afterwards
-        moves only through RFC 6762 §9 conflict resolution.  Re-deriving
-        it here would silently revert a name the daemon had won and put
-        it back on the contested one, so a configured hostname change
-        is a restart rather than a reload.
+        moves only through RFC 6762 §9 conflict resolution; a
+        configured hostname change is a restart rather than a reload.
         """
         server = MDNSServer(MdnsConfig(
             server=MdnsServerConfig(host_name="old-host"),

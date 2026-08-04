@@ -7,10 +7,9 @@ exist.  Loopback is the one interface a test can rely on being able to
 join the mDNS groups on, so the transport binds there while the
 ``InterfaceInfo`` carries the index and addresses under test.
 
-That split is honest rather than a stand-in, because nothing under
-test reads both halves: the transport is consulted only for its
-address-family predicates, and ``iface`` only for the index and
-addresses that end up in the records.
+Nothing under test reads both halves: the transport is consulted
+only for its address-family predicates, and ``iface`` only for the
+index and addresses that end up in the records.
 """
 from __future__ import annotations
 

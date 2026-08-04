@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 NETLINK_ROUTE = 0
 
 # rtnetlink multicast groups (linux/rtnetlink.h) — we only need LINK
-# for BCT II.17; Apple also listens to IFADDR groups but for our
-# purposes a link state transition is enough to drive re-probing.
+# for BCT II.17; mDNSResponder also listens to IFADDR groups but
+# for our purposes a link state transition is enough to drive
+# re-probing.
 RTMGRP_LINK = 1
 
 # rtnetlink message types (linux/rtnetlink.h)
@@ -62,8 +63,9 @@ def parse_netlink_buffer(buf: bytes) -> list[LinkEvent]:
     """Parse a netlink recv buffer into a list of ``LinkEvent``s.
 
     The "up" flag is set iff the message is RTM_NEWLINK *and* the
-    interface carries both ``IFF_RUNNING`` and ``IFF_LOWER_UP``.  Apple
-    uses the same conjunction — ``IFF_RUNNING`` alone is not sufficient
+    interface carries both ``IFF_RUNNING`` and ``IFF_LOWER_UP``.
+    mDNSResponder uses the same conjunction — ``IFF_RUNNING`` alone
+    is not sufficient
     since some drivers set it before the physical layer is actually
     ready.
 

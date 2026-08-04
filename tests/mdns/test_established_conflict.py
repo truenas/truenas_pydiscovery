@@ -244,7 +244,7 @@ class TestReversePTRConflictDiscardsRecord:
     """A record whose uniqueness was assumed rather than claimed by
     probing (RFC 6762 §8.1 reverse PTR) cannot be rescued by
     re-probing: its name is derived from the address, so no rename
-    moves it out of the peer's way.  Apple's
+    moves it out of the peer's way.  mDNSResponder's
     ``kDNSRecordTypeKnownUnique`` branch in ``mDNSCoreReceiveResponse``
     discards the record instead — "We just discard our record to avoid
     continued conflicts (as we do for a conflict on our Unique
@@ -269,8 +269,8 @@ class TestReversePTRConflictDiscardsRecord:
     def test_goodbye_with_conflicting_rdata_is_not_a_conflict(self):
         """RFC 6762 §10.1: TTL=0 is a withdrawal, not an assertion —
         a peer retracting its own record must not cost us ours.
-        Apple gates conflicts on ``rroriginalttl > 0``; avahi ignores
-        goodbyes matching none of its records."""
+        mDNSResponder gates conflicts on ``rroriginalttl > 0``; avahi
+        ignores goodbyes matching none of its records."""
         server, _group, captured = _build_server_with_address()
         rev = IPv4Address("192.0.2.10").reverse_pointer
         msg = MDNSMessage()

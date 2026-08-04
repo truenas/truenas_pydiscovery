@@ -121,7 +121,7 @@ LINK_FLAP_ANNOUNCE_COUNT = 1        # single announcement on flap
 # Apple mDNSResponder uses GoodbyeCount=3.
 GOODBYE_COUNT = 3
 
-# Maximum probe restarts before giving up (Apple: MAX_PROBE_RESTARTS=20)
+# Maximum probe restarts before giving up (mDNSResponder: MAX_PROBE_RESTARTS=20)
 MAX_PROBE_RESTARTS = 20
 
 # Query deferral (RFC 6762 s5.2): 20-120ms random initial delay

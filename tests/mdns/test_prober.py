@@ -433,9 +433,7 @@ class TestConflictRateLimit:
 class TestTaskCancellation:
     """``task.cancel()`` on a task awaiting ``probe`` must actually
     cancel it: the daemon's shutdown and reload paths rely on it to
-    stop conflict tasks mid-probe.  Swallowing the cancellation
-    would leave a "cancelled" §9 rename running its full-registry
-    rebuild concurrently with the canceller's."""
+    stop conflict tasks mid-probe."""
 
     def test_task_cancel_propagates(self):
         p = _prober()

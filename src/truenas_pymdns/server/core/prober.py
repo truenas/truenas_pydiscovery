@@ -135,11 +135,9 @@ class Prober:
             return await future
         except asyncio.CancelledError:
             # The awaiting task was cancelled (daemon shutdown, full
-            # rebuild) — not a probe outcome.  Mark the session
-            # resolved so the aggregated cycle drops it, and let the
-            # cancellation propagate: swallowing it here would leave
-            # a "cancelled" conflict task running its rebuild
-            # concurrently with the canceller's.  A session-level
+            # rebuild) — not a probe outcome.  Cancel the session
+            # future so the aggregated probe cycle drops the session,
+            # and re-raise per the contract above.  A session-level
             # abort (``cancel_all``) resolves ``future`` with False
             # instead and never raises here.
             if not future.done():

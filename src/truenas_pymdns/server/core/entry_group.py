@@ -55,15 +55,16 @@ class OwnedRecord:
     network, then it SHOULD skip the probing step for that resource
     record set."
 
-    Both reference implementations model the same split — Apple as
-    ``kDNSRecordTypeKnownUnique`` ("mDNS can assume name is unique
-    without checking", which ``DefaultProbeCountForRecordType`` turns
-    into zero probes), avahi as ``AVAHI_PUBLISH_NO_PROBE`` ("though
-    the RRset is intended to be unique no probes shall be sent").
-    Only Apple applies it to the reverse address PTR
-    (``AdvertiseInterface``); avahi probes its reverse PTRs and
-    reserves the flag for its localhost entries, so the precedent
-    followed here is RFC 6762 §8.1 plus Apple.
+    Both reference implementations model the same split —
+    mDNSResponder as ``kDNSRecordTypeKnownUnique`` ("mDNS can assume
+    name is unique without checking", which
+    ``DefaultProbeCountForRecordType`` turns into zero probes), avahi
+    as ``AVAHI_PUBLISH_NO_PROBE`` ("though the RRset is intended to
+    be unique no probes shall be sent").  Only mDNSResponder applies
+    it to the reverse address PTR (``AdvertiseInterface``); avahi
+    probes its reverse PTRs and reserves the flag for its localhost
+    entries, so the precedent followed here is RFC 6762 §8.1 plus
+    mDNSResponder.
     """
     record: MDNSRecord
     last_multicast: dict[int, float] = field(default_factory=dict)
@@ -189,13 +190,13 @@ class EntryGroup:
         suffering communication problems beyond the scope of what
         Multicast DNS is designed to solve."
 
-        Probing it is not merely wasteful, it cannot converge.  The
-        PTR's name is derived from the address, so renaming the host
-        rewrites the record's rdata but never its name — two responders
-        sharing an address would conflict, rename, and conflict again
-        forever.  Apple registers this record as
-        ``kDNSRecordTypeKnownUnique`` in ``AdvertiseInterface`` for the
-        same reason, and gives it no conflict callback at all.
+        The PTR's name is derived from the address: renaming the host
+        rewrites the record's rdata but never its name, so §9 rename
+        does not apply to it — on conflict the record is discarded
+        instead (``_discard_known_unique_conflict``).  mDNSResponder
+        registers this record as ``kDNSRecordTypeKnownUnique`` in
+        ``AdvertiseInterface`` and gives it no conflict callback at
+        all.
         """
         addr = ip_address(address)
         if isinstance(addr, IPv4Address):

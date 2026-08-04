@@ -150,15 +150,14 @@ class Responder:
     ) -> None:
         """RFC 6762 s8.1: defend our names against probes without delay."""
         for rr in message.authorities:
-            if self._registry.has_name(rr.key.name):
-                our_records = self._registry.lookup(
-                    rr.key.name, rr.key.rtype, interface_index
+            our_records = self._registry.lookup(
+                rr.key.name, rr.key.rtype, interface_index
+            )
+            if our_records:
+                msg = MDNSMessage.build_response(
+                    [ow.record for ow in our_records]
                 )
-                if our_records:
-                    msg = MDNSMessage.build_response(
-                        [ow.record for ow in our_records]
-                    )
-                    self._send(msg)
+                self._send(msg)
 
     def suppress_if_answered(
         self, message: MDNSMessage, interface_index: int,
@@ -196,30 +195,29 @@ class Responder:
             # Drop any matching records from pending batches; if a
             # batch becomes empty, cancel its timer.
             self._drop_from_pending(
-                {id(ow) for ow in matches},
-                f"peer answered {rr.key.name}",
+                set(matches), f"peer answered {rr.key.name}",
             )
 
-    def drop_pending(self, ows: list[OwnedRecord]) -> None:
-        """Remove *ows* from any pending batched response.
+    def drop_pending(self, owned_records: list[OwnedRecord]) -> None:
+        """Remove *owned_records* from any pending batched response.
 
         Used by conflict withdrawal (RFC 6762 §9): once a record is
         discarded, a deferred answer scheduled moments earlier must
         not re-assert it.
         """
         self._drop_from_pending(
-            {id(ow) for ow in ows}, "record withdrawn",
+            set(owned_records), "record withdrawn",
         )
 
     def _drop_from_pending(
-        self, matched_ids: set[int], context: str,
+        self, matched: set[OwnedRecord], context: str,
     ) -> None:
-        """Drop records with these ids from every pending batch,
-        cancelling a batch's timer when it empties."""
+        """Drop *matched* records from every pending batch, cancelling
+        a batch's timer when it empties."""
         empty_pkeys: list[str] = []
         for pkey, (records, add, handle, iface) in self._pending.items():
             remaining = [
-                ow for ow in records if id(ow) not in matched_ids
+                ow for ow in records if ow not in matched
             ]
             if len(remaining) == len(records):
                 continue
@@ -278,9 +276,9 @@ class Responder:
             # avahi avahi_record_list_push guards the same way): dedup by
             # identity so a repeat query for the same records within the
             # defer window doesn't emit each answer twice.
-            existing_ids = {id(ow) for ow in existing_records}
+            existing = set(existing_records)
             existing_records.extend(
-                ow for ow in eligible if id(ow) not in existing_ids
+                ow for ow in eligible if ow not in existing
             )
             return
 

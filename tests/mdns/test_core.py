@@ -149,6 +149,18 @@ class TestEntryGroup:
         eg.add_service("Test", "_http._tcp", "local", "h.local", 80)
         assert eg.interfaces == [1, 2]
 
+    def test_publishes_on_unbound_group_matches_any_interface(self):
+        eg = EntryGroup()
+        assert eg.publishes_on(1)
+        assert eg.publishes_on(99)
+
+    def test_publishes_on_bound_group_matches_only_members(self):
+        eg = EntryGroup()
+        eg.interfaces = [1, 2]
+        assert eg.publishes_on(1)
+        assert eg.publishes_on(2)
+        assert not eg.publishes_on(3)
+
 
 class TestReversePTRSkipsProbing:
     """RFC 6762 §8.1: "If a responder knows by other means that its

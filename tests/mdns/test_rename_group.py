@@ -1,10 +1,13 @@
 """Conflict-rename helper (``_rename_group`` in server.server).
 
-Covers RFC 6762 §9: when an entry group collides with a peer, its
-primary name's first DNS label must be rewritten and every record
-that references it (key.name on SRV/TXT/A/AAAA, PTR data.target on
-service/subtype/reverse PTRs) must be updated in place, with
-per-record scheduling state reset so the re-probe starts clean.
+Covers RFC 6762 §9 for service groups: when an entry group collides
+with a peer, its SRV instance name's first DNS label must be
+rewritten and every record that references it (key.name on SRV/TXT,
+PTR data.target on service/subtype PTRs) must be updated in place,
+with per-record scheduling state reset so the re-probe starts clean.
+Host groups take a different path — ``_rename_host_after_conflict``
+re-registers the whole registry, covered by
+test_host_name_lifecycle.py.
 """
 from __future__ import annotations
 
@@ -137,25 +140,6 @@ class TestRenameServiceGroup:
         assert new == "nas-3._test._tcp.local"
 
 
-class TestRenameHostGroup:
-    def test_host_a_and_reverse_ptr_updated(self):
-        g = _host_group()
-        old, new = _rename_group(g)
-        assert old == "myhost.local"
-        assert new == "myhost-2.local"
-
-        a_names = {
-            r.key.name for r in g.records if r.key.rtype == QType.A
-        }
-        assert a_names == {"myhost-2.local"}
-
-        rev_ptr = next(
-            r for r in g.records if r.key.rtype == QType.PTR
-        )
-        assert isinstance(rev_ptr.data, PTRRecordData)
-        assert rev_ptr.data.target == "myhost-2.local"
-
-
 class TestObsoleteSharedRecords:
     """Coverage for the RFC 6762 §8.4 / BCT II.16 goodbye-on-rename
     selector: shared records whose name or PTR target references the
@@ -208,7 +192,7 @@ class TestObsoleteSharedRecords:
 
 
 class TestEmptyGroup:
-    def test_group_without_srv_or_a_returns_none(self):
+    def test_group_without_srv_returns_none(self):
         """Groups with only unrelated records (should not happen in
         practice) must not crash — just return (None, None)."""
         g = EntryGroup()

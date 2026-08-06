@@ -297,6 +297,32 @@ class TestReloadDispatch:
         new_group = next(iter(server._service_groups.values()))
         assert new_group is not old_group
 
+    def test_disallow_other_stacks_change_forces_full_rebuild(
+        self, tmp_path,
+    ):
+        # The bind policy is a socket option: flipping it requires
+        # rebinding, so the dispatcher must pick full rebuild even
+        # though services.d is unchanged.
+        server = _make_server(tmp_path)
+        _write_svc(server._config.service_dir, "smb.conf", "_smb._tcp", 445)
+        asyncio.run(server._reload())
+
+        old_group = next(iter(server._service_groups.values()))
+
+        new_cfg = DaemonConfig(
+            server=ServerConfig(
+                host_name="host",
+                disallow_other_stacks=False,
+            ),
+            service_dir=server._config.service_dir,
+            rundir=server._config.rundir,
+        )
+        server.apply_config(new_cfg)
+        asyncio.run(server._reload())
+
+        new_group = next(iter(server._service_groups.values()))
+        assert new_group is not old_group
+
     def test_record_still_asserted_across_groups(self, tmp_path):
         # RFC 6763 §9: two services of the same type share the
         # meta-PTR ``_services._dns-sd._udp.<domain>`` →

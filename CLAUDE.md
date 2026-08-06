@@ -42,6 +42,29 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - Do not rely on memory or secondhand summaries for protocol behavior —
   quote the spec section you are implementing.
 
+## Citing Specs and Reference Implementations
+
+- **Don't cite line numbers for anything that can move under the
+  reader** — our own code, specs, or an untagged checkout. They rot the
+  moment either side changes, and a stale pointer is worse than none —
+  it sends the next reader to unrelated code with false confidence. The
+  exception is a reference implementation pinned to a specific upstream
+  tag in the package README (e.g. `mDNSResponder-2881.0.25` or avahi
+  `v0.8` in `src/truenas_pymdns/README.md`): the tag freezes the file, so a
+  pointer like `mDNSCore/mDNS.c:14262` cannot rot and is fine to cite.
+- Cite RFCs and other specs by section: `RFC 6762 §6.2`. Quote the
+  normative sentence inline when the exact wording is what the code
+  turns on. Do not cite `docs/specs/<file>:<line>`.
+- Cite reference implementations by symbol, optionally with the file:
+  ``AdvertiseInterface`` (`mDNSCore/mDNS.c`),
+  ``avahi_interface_address_update_rrs`` (`avahi-core/iface.c`),
+  ``open_sockets`` (`source3/nmbd/nmbd.c`). The symbol is what stays
+  greppable across upstream releases. When the reference is pinned to a
+  tag as above, a line number may accompany the symbol
+  (`ResolveSimultaneousProbe` at `mDNS.c:8053`).
+- The same applies to references to our own code: name the function or
+  class, never `module.py:123`.
+
 ## Man Pages
 
 - All changes to CLI tool flags, arguments, or behavior must include corresponding updates to man pages in `debian/man/`

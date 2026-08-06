@@ -304,6 +304,11 @@ def mdns_daemon(candidate_interface, tmp_path):
         mdns={
             "use-ipv4": "yes",
             "use-ipv6": "no",
+            # The wire-observation sockets these tests bind on 5353
+            # (listeners, rival responders) need to coexist with the
+            # daemon; default-exclusive binding is covered by
+            # tests/mdns/test_multicast_sockets.py.
+            "disallow-other-stacks": "no",
             "service-dir": str(svc_dir),
         },
     )
@@ -359,6 +364,10 @@ def mdns_daemon_factory(candidate_interface, tmp_path_factory):
             mdns={
                 "use-ipv4": "yes",
                 "use-ipv6": "no",
+                # As in ``mdns_daemon``: the suite's own 5353
+                # sockets (and the second daemon these factory
+                # tests race) must share the port.
+                "disallow-other-stacks": "no",
                 "service-dir": str(svc_dir),
             },
         )

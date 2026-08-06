@@ -30,6 +30,7 @@ host-name = truenas
 domain-name = local
 use-ipv4 = yes
 use-ipv6 = yes
+disallow-other-stacks = yes
 cache-entries-max = 4096
 ratelimit-interval-usec = 1000000
 ratelimit-burst = 1000

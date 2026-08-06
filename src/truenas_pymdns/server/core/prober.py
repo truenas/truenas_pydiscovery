@@ -32,6 +32,7 @@ from truenas_pymdns.protocol.constants import (
     CONFLICT_RATE_WINDOW,
     MAX_PROBING_CONFLICT_RETRIES,
     PROBE_COUNT,
+    PROBE_INITIAL_RANDOM_MAX,
     PROBE_INTERVAL,
     QType,
     SIMULTANEOUS_PROBE_DEFER,
@@ -42,18 +43,14 @@ from .conflict import lexicographic_compare
 
 logger = logging.getLogger(__name__)
 
-# How long to collect concurrent probes before sending the first
-# aggregated probe message (avahi uses PROBE_DEFER_MSEC=50ms).
-_PROBE_AGGREGATION_WINDOW = 0.050
-
 
 @dataclass
 class ProbingSession:
     """Tracks state for one in-flight probing attempt."""
     records: list[MDNSRecord]
     names: set[str]
+    future: asyncio.Future
     probes_sent: int = 0
-    future: asyncio.Future | None = None
     # RFC 6762 s8.2 stale-packet tolerance: conflicts observed so far
     # for this session.  <= MAX_PROBING_CONFLICT_RETRIES triggers a
     # 1-second defer + re-probe with the SAME name; exceeding it
@@ -82,7 +79,6 @@ class Prober:
         self._conflict_times: collections.deque[float] = collections.deque()
         # Aggregation: sessions waiting for the first probe cycle
         self._pending_sessions: list[ProbingSession] = []
-        self._aggregation_handle: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._probe_task: asyncio.Task | None = None
         # RFC 6762 s8.2: global "no probes until this monotonic time"
@@ -104,6 +100,12 @@ class Prober:
         ``conflicts_seen`` → rename, matching avahi (unbounded rename)
         and mDNSResponder (``ProbingConflictCount`` → rename); neither
         reference permanently disables probing for a whole interface.
+
+        Cancelling the awaiting *task* propagates ``CancelledError``
+        — shutdown and the reload paths rely on ``task.cancel()``
+        actually stopping a conflict task parked here.  Only
+        ``cancel_all`` (a session-level abort) turns into a False
+        return.
         """
         if not records:
             return True
@@ -128,9 +130,15 @@ class Prober:
         try:
             return await future
         except asyncio.CancelledError:
+            # The awaiting task was cancelled (daemon shutdown, full
+            # rebuild) — not a probe outcome.  Cancel the session
+            # future so the aggregated probe cycle drops the session,
+            # and re-raise per the contract above.  A session-level
+            # abort (``cancel_all``) resolves ``future`` with False
+            # instead and never raises here.
             if not future.done():
-                future.set_result(False)
-            return False
+                future.cancel()
+            raise
         finally:
             self._sessions.pop(session_key, None)
 
@@ -148,7 +156,7 @@ class Prober:
         )
 
         for session_key, session in list(self._sessions.items()):
-            if session.future and session.future.done():
+            if session.future.done():
                 continue
 
             their_records: list[MDNSRecord] = []
@@ -220,20 +228,17 @@ class Prober:
                         session.names, source,
                         MAX_PROBING_CONFLICT_RETRIES,
                     )
-                    if session.future and not session.future.done():
+                    if not session.future.done():
                         session.future.set_result(False)
                     self._on_conflict(session.records)
 
     def cancel_all(self) -> None:
         """Cancel all active probing sessions."""
-        if self._aggregation_handle:
-            self._aggregation_handle.cancel()
-            self._aggregation_handle = None
         if self._probe_task:
             self._probe_task.cancel()
             self._probe_task = None
         for session in self._sessions.values():
-            if session.future and not session.future.done():
+            if not session.future.done():
                 session.future.set_result(False)
         self._sessions.clear()
         self._pending_sessions.clear()
@@ -272,7 +277,9 @@ class Prober:
             # the 1-second suppress dominates any per-record jitter
             # (mDNSCore/mDNS.c).
             if not await self._wait_if_probes_suppressed():
-                await asyncio.sleep(random.uniform(0, PROBE_INTERVAL))
+                await asyncio.sleep(
+                    random.uniform(0, PROBE_INITIAL_RANDOM_MAX),
+                )
 
             # Collect all sessions that were added during jitter window
             batch = list(self._pending_sessions)
@@ -281,18 +288,13 @@ class Prober:
             if not batch:
                 return
 
-            active = [
-                s for s in batch if s.future and not s.future.done()
-            ]
+            active = [s for s in batch if not s.future.done()]
             if not active:
                 return
 
             for i in range(PROBE_COUNT):
                 # Re-check which sessions are still active (not conflicted)
-                active = [
-                    s for s in active
-                    if s.future and not s.future.done()
-                ]
+                active = [s for s in active if not s.future.done()]
                 if not active:
                     return
 
@@ -308,7 +310,7 @@ class Prober:
 
             # All surviving sessions succeed
             for s in active:
-                if s.future and not s.future.done():
+                if not s.future.done():
                     s.future.set_result(True)
         except asyncio.CancelledError:
             # handle_incoming cancels us on a conflict (RFC 6762 s8.2
@@ -317,7 +319,7 @@ class Prober:
             # window expires.
             for s in (active or batch):
                 if (
-                    s.future and not s.future.done()
+                    not s.future.done()
                     and s not in self._pending_sessions
                 ):
                     self._pending_sessions.append(s)
@@ -364,10 +366,10 @@ class Prober:
                     )
             # RFC 6762 s8.1: "Cache Flush Bit Not Set in Proposed Answer
             # of Probes" — clear the unique-RRSet bit on records sent in
-            # the Authority section.  mDNSResponder's SendQueries
-            # (mDNSCore/mDNS.c:4519-4534) writes probe Authority records
-            # without the `rrclass |= kDNSClass_UniqueRRSet` flip it uses
-            # for Answer-section writes.
+            # the Authority section.  mDNSResponder's ``SendQueries``
+            # (mDNSCore/mDNS.c:4519-4534) writes probe Authority records without
+            # the `rrclass |= kDNSClass_UniqueRRSet` flip it uses for
+            # Answer-section writes.
             auth_set.update(
                 replace(r, cache_flush=False) for r in session.records
             )

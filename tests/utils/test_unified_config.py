@@ -120,6 +120,26 @@ workgroup = WG
         assert cfg.mdns.server.interfaces == ["eth1", "eth2"]
         assert cfg.netbiosns.server.interfaces == ["eth0"]
 
+    def test_mdns_disallow_other_stacks(self, tmp_path):
+        # Defaults to yes (exclusive 5353 bind); the [mdns] key
+        # restores avahi's shared-port behaviour.
+        cfg = load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = eth0
+
+[mdns]
+"""))
+        assert cfg.mdns.server.disallow_other_stacks is True
+
+        cfg = load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = eth0
+
+[mdns]
+disallow-other-stacks = no
+"""))
+        assert cfg.mdns.server.disallow_other_stacks is False
+
     def test_discovery_interfaces_rejects_ipv4_token(self, tmp_path):
         # The shared ``[discovery] interfaces`` list must be valid
         # for every protocol the daemon hosts.  Bare IPv4 tokens

@@ -142,7 +142,7 @@ def _declare_text_only_namespaces(envelope: ET.Element) -> None:
     appears as a tag namespace; the prefixes we add here are the
     ones that appear **only** in QName text content (``wsdp:`` and
     ``pub:`` in ``<wsd:Types>``).  Mirrors the role of
-    ``christgau/wsdd``'s forced-full-xmlns (``wsdd.py:506-507``)
+    ``christgau/wsdd``'s forced-full-xmlns (``build_message_tree``)
     without emitting duplicates.
     """
     used_in_tags: set[str] = set()

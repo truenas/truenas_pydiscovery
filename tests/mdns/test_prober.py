@@ -428,3 +428,43 @@ class TestConflictRateLimit:
         import pytest
         with pytest.raises(asyncio.TimeoutError):
             _run(p._wait_if_rate_limited(), timeout=0.3)
+
+
+class TestTaskCancellation:
+    """``task.cancel()`` on a task awaiting ``probe`` must actually
+    cancel it: the daemon's shutdown and reload paths rely on it to
+    stop conflict tasks mid-probe."""
+
+    def test_task_cancel_propagates(self):
+        p = _prober()
+
+        async def scenario() -> asyncio.Task:
+            task = asyncio.get_running_loop().create_task(
+                p.probe([_a("cancelme.local", "192.0.2.1")])
+            )
+            # Park the probe on its session future.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return task
+
+        task = _run(scenario())
+        assert task.cancelled()
+
+    def test_cancel_all_resolves_probe_to_false(self):
+        """A session-level abort is not a task cancellation: the
+        awaiting task keeps running and sees a failed probe."""
+        p = _prober()
+
+        async def scenario() -> bool:
+            task = asyncio.get_running_loop().create_task(
+                p.probe([_a("abortme.local", "192.0.2.1")])
+            )
+            await asyncio.sleep(0.05)
+            p.cancel_all()
+            return await task
+
+        assert _run(scenario()) is False

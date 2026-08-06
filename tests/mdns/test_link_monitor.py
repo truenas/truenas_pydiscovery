@@ -51,7 +51,7 @@ class TestParseNetlinkBuffer:
     def test_running_without_lower_up_is_not_up(self):
         """Some drivers assert IFF_RUNNING before the PHY is actually
         carrier-sensed.  We require BOTH IFF_RUNNING and IFF_LOWER_UP,
-        matching Apple's interpretation."""
+        matching mDNSResponder's interpretation."""
         frame = _craft(
             RTM_NEWLINK, ifindex=3, flags=IFF_UP | IFF_RUNNING,
         )

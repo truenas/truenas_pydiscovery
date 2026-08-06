@@ -21,6 +21,7 @@ Unified daemon config (the sole production path):
     interfaces = eth0, eth1
     use-ipv4 = yes
     use-ipv6 = yes
+    disallow-other-stacks = yes
     cache-entries-max = 4096
     service-dir = /etc/truenas-discovery/services.d
 
@@ -87,6 +88,11 @@ class ServerConfig:
     interfaces: list[str] = field(default_factory=list)
     use_ipv4: bool = True
     use_ipv6: bool = True
+    # Avahi's ``disallow-other-stacks``, default flipped to on: bind
+    # UDP 5353 exclusively (no SO_REUSEADDR/SO_REUSEPORT) so a stray
+    # avahi or systemd-resolved mDNS listener can't answer alongside
+    # this daemon — see ``create_v4_socket``.
+    disallow_other_stacks: bool = True
     cache_entries_max: int = DEFAULT_CACHE_MAX_ENTRIES
     ratelimit_interval_usec: int = 1_000_000
     ratelimit_burst: int = 1000
@@ -169,6 +175,8 @@ def generate_daemon_config(config: DaemonConfig) -> bytes:
     cp.set("server", "interfaces", ", ".join(s.interfaces))
     cp.set("server", "use-ipv4", _bool_str(s.use_ipv4))
     cp.set("server", "use-ipv6", _bool_str(s.use_ipv6))
+    cp.set("server", "disallow-other-stacks",
+           _bool_str(s.disallow_other_stacks))
     cp.set("server", "cache-entries-max", str(s.cache_entries_max))
     cp.set("server", "ratelimit-interval-usec",
            str(s.ratelimit_interval_usec))
@@ -262,6 +270,10 @@ def load_daemon_config(
             cfg.server.use_ipv4 = _parse_bool(s["use-ipv4"])
         if "use-ipv6" in s:
             cfg.server.use_ipv6 = _parse_bool(s["use-ipv6"])
+        if "disallow-other-stacks" in s:
+            cfg.server.disallow_other_stacks = _parse_bool(
+                s["disallow-other-stacks"]
+            )
         if "cache-entries-max" in s:
             val = int(s["cache-entries-max"])
             cfg.server.cache_entries_max = max(

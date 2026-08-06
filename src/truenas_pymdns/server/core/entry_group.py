@@ -22,7 +22,7 @@ from truenas_pymdns.protocol.records import (
 )
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class OwnedRecord:
     """Server-side wrapper around an authoritative MDNSRecord.
 
@@ -36,18 +36,45 @@ class OwnedRecord:
     the monotonic time this record was last multicast / last seen
     answered by a peer ON THAT INTERFACE.  Both the §6 1-second
     multicast rate limit and §7.4 duplicate-answer suppression are
-    per-interface ("... on that particular interface",
-    docs/specs/rfc6762.txt:854-857); one ServiceRegistry shares these
-    OwnedRecord objects across every per-interface Responder, so the
-    timestamps MUST be keyed by interface or one link's traffic would
-    rate-limit or suppress another's.
+    per-interface (§6: "... on that particular interface"); one
+    ServiceRegistry shares these OwnedRecord objects across every
+    per-interface Responder, so the timestamps MUST be keyed by
+    interface or one link's traffic would rate-limit or suppress
+    another's.
 
     Analogous to mDNSResponder's AuthRecord.LastMCTime /
     LastMCInterface pair (mDNSCore/mDNS.c:8527).
+
+    ``should_probe`` separates "unique" from "unique and claimed by
+    probing".  A record can carry the cache-flush bit — asserting it
+    owns its whole RRSet — without the responder needing to verify
+    that ownership first, when the name cannot collide by
+    construction.  RFC 6762 §8.1: "If a responder knows by other
+    means that its unique resource record set name, rrtype, and
+    rrclass cannot already be in use by any other responder on the
+    network, then it SHOULD skip the probing step for that resource
+    record set."
+
+    Both reference implementations model the same split —
+    mDNSResponder as ``kDNSRecordTypeKnownUnique`` ("mDNS can assume
+    name is unique without checking", which
+    ``DefaultProbeCountForRecordType`` turns into zero probes), avahi
+    as ``AVAHI_PUBLISH_NO_PROBE`` ("though the RRset is intended to
+    be unique no probes shall be sent").  Only mDNSResponder applies
+    it to the reverse address PTR (``AdvertiseInterface``); avahi
+    probes its reverse PTRs and reserves the flag for its localhost
+    entries, so the precedent followed here is RFC 6762 §8.1 plus
+    mDNSResponder.
+
+    Equality and hashing are object identity (``eq=False``): a
+    wrapper stands for one registration, and the withdrawal paths
+    collect wrappers in sets and remove them from lists by that
+    identity.
     """
     record: MDNSRecord
     last_multicast: dict[int, float] = field(default_factory=dict)
     last_peer_answer: dict[int, float] = field(default_factory=dict)
+    should_probe: bool = True
 
 
 class EntryGroup:
@@ -65,6 +92,17 @@ class EntryGroup:
         self._on_state_change = on_state_change
         self.interfaces: list[int] | None = None  # None = all interfaces
 
+    def publishes_on(self, interface_index: int) -> bool:
+        """True if this group publishes on *interface_index*.
+
+        An unbound group (``interfaces`` is None) publishes on every
+        interface.
+        """
+        return (
+            self.interfaces is None
+            or interface_index in self.interfaces
+        )
+
     @property
     def records(self) -> list[MDNSRecord]:
         """Return a copy of all records (unwrapped to wire form)."""
@@ -75,11 +113,19 @@ class EntryGroup:
         """Return a copy of the OwnedRecord wrappers (for registry lookup)."""
         return list(self._records)
 
-    def add_record(self, record: MDNSRecord) -> None:
-        """Append a record to this group; only allowed in UNCOMMITTED state."""
+    def add_record(
+        self, record: MDNSRecord, should_probe: bool = True,
+    ) -> None:
+        """Append a record to this group; only allowed in UNCOMMITTED state.
+
+        *should_probe* is False for a unique record whose name cannot
+        collide by construction — see ``OwnedRecord.should_probe``.
+        """
         if self.state != EntryGroupState.UNCOMMITTED:
             raise RuntimeError("Cannot add records after commit")
-        self._records.append(OwnedRecord(record))
+        self._records.append(
+            OwnedRecord(record, should_probe=should_probe),
+        )
 
     def add_service(
         self,
@@ -148,7 +194,26 @@ class EntryGroup:
             ))
 
     def add_address(self, hostname: str, address: str) -> None:
-        """Add an A or AAAA record for a hostname plus reverse PTR."""
+        """Add an A or AAAA record for a hostname plus reverse PTR.
+
+        The address record is probed; the reverse PTR is not.  RFC 6762
+        §8.1 names this exact case as the example of a record set to
+        skip probing for: "when creating the reverse address mapping
+        PTR records, the host can reasonably assume that no other host
+        will be trying to create those same PTR records, since that
+        would imply that the two hosts were trying to use the same IP
+        address, and if that were the case, the two hosts would be
+        suffering communication problems beyond the scope of what
+        Multicast DNS is designed to solve."
+
+        The PTR's name is derived from the address: renaming the host
+        rewrites the record's rdata but never its name, so §9 rename
+        does not apply to it — on conflict the record is discarded
+        instead (``_discard_known_unique_conflict``).  mDNSResponder
+        registers this record as ``kDNSRecordTypeKnownUnique`` in
+        ``AdvertiseInterface`` and gives it no conflict callback at
+        all.
+        """
         addr = ip_address(address)
         if isinstance(addr, IPv4Address):
             self.add_record(MDNSRecord(
@@ -164,7 +229,7 @@ class EntryGroup:
                 ttl=DEFAULT_TTL_HOST_RECORD,
                 data=PTRRecordData(hostname),
                 cache_flush=True,
-            ))
+            ), should_probe=False)
         elif isinstance(addr, IPv6Address):
             self.add_record(MDNSRecord(
                 key=MDNSRecordKey(hostname, QType.AAAA),
@@ -178,7 +243,22 @@ class EntryGroup:
                 ttl=DEFAULT_TTL_HOST_RECORD,
                 data=PTRRecordData(hostname),
                 cache_flush=True,
-            ))
+            ), should_probe=False)
+
+    def remove_record(self, owned_record: OwnedRecord) -> bool:
+        """Withdraw *owned_record* from this group; True if it was a
+        member.
+
+        ``OwnedRecord`` equality is object identity, so this removes
+        exactly the given wrapper.  Used for conflict withdrawal of an
+        established record (RFC 6762 §9), so unlike ``add_record`` it
+        carries no state restriction.
+        """
+        try:
+            self._records.remove(owned_record)
+        except ValueError:
+            return False
+        return True
 
     def set_state(self, state: EntryGroupState) -> None:
         """Transition to a new state and invoke the state-change callback."""
@@ -188,5 +268,14 @@ class EntryGroup:
                 self._on_state_change(state)
 
     def get_unique_records(self) -> list[MDNSRecord]:
-        """Return records that should be probed (unique records)."""
-        return [ow.record for ow in self._records if ow.record.cache_flush]
+        """Return the records to probe for.
+
+        Unique (cache-flush) records, minus those whose uniqueness is
+        known a priori and so skip probing per RFC 6762 §8.1 — see
+        ``OwnedRecord.should_probe``.  They are still announced with
+        the cache-flush bit; only the ownership claim is skipped.
+        """
+        return [
+            ow.record for ow in self._records
+            if ow.record.cache_flush and ow.should_probe
+        ]

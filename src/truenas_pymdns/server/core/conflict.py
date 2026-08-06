@@ -14,7 +14,7 @@ def lexicographic_compare(
     Returns the sign of ``ours - theirs`` after sorting both sides into
     the §8.2 lexicographical order and comparing element-by-element;
     ties fall through to ``len(ours) - len(theirs)`` (the set that runs
-    out of records first loses, docs/specs/rfc6762.txt:1631-1638).
+    out of records first loses, §8.2.1).
 
     Both the sort key and the per-record comparison use the raw,
     uncompressed rdata wire bytes (``MDNSRecord.lexicographic_cmp``),
@@ -48,7 +48,7 @@ def lexicographic_compare(
 _TRAILING_NUM = re.compile(r"^(.*?)(?:\s*[#-](\d+))?$")
 
 
-def generate_alternative_name(name: str, attempt: int = 0) -> str:
+def generate_alternative_name(name: str) -> str:
     """Generate an alternative name after a conflict.
 
     Hostnames:  "myhost"     -> "myhost-2" -> "myhost-3"
@@ -57,11 +57,7 @@ def generate_alternative_name(name: str, attempt: int = 0) -> str:
     m = _TRAILING_NUM.match(name)
     base = m.group(1) if m else name
     current_num = int(m.group(2)) if m and m.group(2) else 1
-
-    if attempt > 0:
-        next_num = current_num + attempt
-    else:
-        next_num = current_num + 1
+    next_num = current_num + 1
 
     # Use hyphen for hostnames (no spaces), hash for instance names
     if " " in base:

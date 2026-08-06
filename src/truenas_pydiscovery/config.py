@@ -122,6 +122,10 @@ def _build_mdns(
             cfg.server.use_ipv4 = _parse_bool(s["use-ipv4"])
         if "use-ipv6" in s:
             cfg.server.use_ipv6 = _parse_bool(s["use-ipv6"])
+        if "disallow-other-stacks" in s:
+            cfg.server.disallow_other_stacks = _parse_bool(
+                s["disallow-other-stacks"],
+            )
         if "cache-entries-max" in s:
             cfg.server.cache_entries_max = int(s["cache-entries-max"])
         if "ratelimit-interval-usec" in s:

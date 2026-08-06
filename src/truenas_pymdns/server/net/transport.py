@@ -49,12 +49,14 @@ class MDNSTransport:
         interface_addr_v4: str | None = None,
         use_ipv4: bool = True,
         use_ipv6: bool = True,
+        disallow_other_stacks: bool = True,
     ):
         self._ifindex = interface_index
         self._ifname = interface_name
         self._ifaddr_v4 = interface_addr_v4
         self._use_ipv4 = use_ipv4 and interface_addr_v4 is not None
         self._use_ipv6 = use_ipv6
+        self._disallow_other_stacks = disallow_other_stacks
         self._sock_v4: socket.socket | None = None
         self._sock_v6: socket.socket | None = None
         self._handler: MessageHandler | None = None
@@ -71,7 +73,10 @@ class MDNSTransport:
 
         if self._use_ipv4 and self._ifaddr_v4:
             try:
-                self._sock_v4 = create_v4_socket(self._ifname, self._ifaddr_v4)
+                self._sock_v4 = create_v4_socket(
+                    self._ifname, self._ifaddr_v4,
+                    self._disallow_other_stacks,
+                )
                 join_multicast_v4(self._sock_v4, self._ifaddr_v4)
                 self._joined_v4 = True
                 loop.add_reader(self._sock_v4.fileno(), self._on_readable_v4)
@@ -87,7 +92,10 @@ class MDNSTransport:
 
         if self._use_ipv6:
             try:
-                self._sock_v6 = create_v6_socket(self._ifindex, self._ifname)
+                self._sock_v6 = create_v6_socket(
+                    self._ifindex, self._ifname,
+                    self._disallow_other_stacks,
+                )
                 join_multicast_v6(self._sock_v6, self._ifindex)
                 self._joined_v6 = True
                 loop.add_reader(self._sock_v6.fileno(), self._on_readable_v6)
@@ -195,6 +203,20 @@ class MDNSTransport:
             logger.debug("Failed to parse mDNS packet from %s: %s", addr, e)
             return
 
+        # RFC 6762 §18.3 / §18.11: multicast DNS carries only standard
+        # queries and responses with a zero Response Code.  A datagram
+        # with any other OPCODE or a non-zero RCODE is not a multicast
+        # DNS message and is ignored on reception, ahead of the
+        # query/response split so neither path sees it.  avahi applies
+        # the same gate in ``avahi_dns_packet_check_valid_multicast``
+        # (avahi-core/dns.c:325).
+        if message.opcode != 0 or message.rcode != 0:
+            logger.debug(
+                "Ignoring non-mDNS message (OPCODE %d, RCODE %d) from %s",
+                message.opcode, message.rcode, addr,
+            )
+            return
+
         source_port = addr[1]
         if message.is_response:
             # RFC 6762 s6: responses MUST originate from port 5353; a
@@ -206,9 +228,9 @@ class MDNSTransport:
                     source_port, addr,
                 )
                 return
-            # RFC 6762 §11 (docs/specs/rfc6762.txt:2108-2125): mDNS
-            # responses are sent with IP TTL 255; one arriving with a
-            # lower TTL crossed a router and is off-link, so drop it as
+            # RFC 6762 §11: mDNS responses are sent with IP TTL 255;
+            # one arriving with a lower TTL crossed a router and is
+            # off-link, so drop it as
             # an anti-spoofing guard.  Scoped to responses (mirrors
             # avahi's check_response_ttl) — §11 mandates an address
             # check, not a TTL drop — and a missing TTL cmsg is treated
@@ -234,7 +256,7 @@ class MDNSTransport:
                 # Linux delivers the *received* TTL in an IP_TTL (2)
                 # cmsg; IP_RECVTTL (12) is only the setsockopt enable
                 # option, never the cmsg_type of a delivered value.
-                # Accept either — avahi (avahi-core/socket.c:726-733)
+                # Accept either — avahi (``avahi_recv_dns_packet_ipv4``)
                 # and mDNSResponder (mDNSPosix/mDNSUNP.c) both do.
                 if cmsg_level == socket.IPPROTO_IP and cmsg_type in (
                     socket.IP_TTL, IP_RECVTTL,

@@ -37,8 +37,10 @@ PYTHONPATH=src python3 -m pytest tests/ -v
   protocol to its normative references and local copies.
 - If a spec referenced in `PROTOCOLSPECS.md` is not yet in `docs/specs/`,
   download it there first (as `.txt`/`.pdf`/`.html` matching the canonical
-  form), read it, then proceed with the change. Add the local-copy link to
-  `PROTOCOLSPECS.md` in the same commit.
+  form), read it, then proceed with the change. Add its file name to the
+  **Local copy** column of `PROTOCOLSPECS.md` in the same commit, linked to
+  the URL it was downloaded from: `docs/specs/` is not vendored, so docs
+  link URLs, never `docs/specs/` paths.
 - Do not rely on memory or secondhand summaries for protocol behavior —
   quote the spec section you are implementing.
 

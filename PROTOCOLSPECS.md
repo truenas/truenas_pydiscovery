@@ -2,8 +2,10 @@
 
 Normative references for the three protocols implemented by
 `truenas-discoveryd`. Each entry links to the canonical public
-specification; where the repo carries a local archival copy under
-`docs/specs/`, the filename is noted in the **Local copy** column.
+specification. The specifications are not vendored in this repository:
+the **Local copy** column names the file a working copy is saved as in
+the gitignored `docs/specs/` directory, linked to the URL it is
+downloaded from.
 
 Per-protocol usage notes (which clauses of each spec we actually
 implement) live in the per-package READMEs:
@@ -15,8 +17,8 @@ implement) live in the per-package READMEs:
 
 | Spec | Title | Publisher | Local copy |
 |------|-------|-----------|------------|
-| [RFC 6762](https://datatracker.ietf.org/doc/html/rfc6762) | Multicast DNS | IETF | [`docs/specs/rfc6762.txt`](docs/specs/rfc6762.txt) |
-| [RFC 6763](https://datatracker.ietf.org/doc/html/rfc6763) | DNS-Based Service Discovery | IETF | [`docs/specs/rfc6763.txt`](docs/specs/rfc6763.txt) |
+| [RFC 6762](https://datatracker.ietf.org/doc/html/rfc6762) | Multicast DNS | IETF | [`rfc6762.txt`](https://www.rfc-editor.org/rfc/rfc6762.txt) |
+| [RFC 6763](https://datatracker.ietf.org/doc/html/rfc6763) | DNS-Based Service Discovery | IETF | [`rfc6763.txt`](https://www.rfc-editor.org/rfc/rfc6763.txt) |
 | [RFC 6760](https://datatracker.ietf.org/doc/html/rfc6760) | Requirements for a Protocol to Replace AppleTalk NBP | IETF | — |
 | [RFC 1035](https://datatracker.ietf.org/doc/html/rfc1035) | Domain Names — Implementation and Specification | IETF | — |
 | [RFC 2782](https://datatracker.ietf.org/doc/html/rfc2782) | DNS SRV Records | IETF | — |
@@ -26,23 +28,23 @@ implement) live in the per-package READMEs:
 
 | Spec | Title | Publisher | Local copy |
 |------|-------|-----------|------------|
-| [RFC 1001](https://datatracker.ietf.org/doc/html/rfc1001) | NetBIOS Service on TCP/UDP: Concepts and Methods | IETF | [`docs/specs/rfc1001.txt`](docs/specs/rfc1001.txt) |
-| [RFC 1002](https://datatracker.ietf.org/doc/html/rfc1002) | NetBIOS Service on TCP/UDP: Detailed Specifications | IETF | [`docs/specs/rfc1002.txt`](docs/specs/rfc1002.txt) |
-| [MS-BRWS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-brws/) | Common Internet File System (CIFS) Browser Protocol | Microsoft | [`docs/specs/ms-brws.pdf`](docs/specs/ms-brws.pdf) |
-| [MS-MAIL](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-mail/) | Remote Mailslot Protocol (the mailslot write that carries browser frames) | Microsoft | [`docs/specs/ms-mail.pdf`](docs/specs/ms-mail.pdf) |
+| [RFC 1001](https://datatracker.ietf.org/doc/html/rfc1001) | NetBIOS Service on TCP/UDP: Concepts and Methods | IETF | [`rfc1001.txt`](https://www.rfc-editor.org/rfc/rfc1001.txt) |
+| [RFC 1002](https://datatracker.ietf.org/doc/html/rfc1002) | NetBIOS Service on TCP/UDP: Detailed Specifications | IETF | [`rfc1002.txt`](https://www.rfc-editor.org/rfc/rfc1002.txt) |
+| [MS-BRWS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-brws/) | Common Internet File System (CIFS) Browser Protocol | Microsoft | [`ms-brws.pdf`](https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-BRWS/%5bMS-BRWS%5d.pdf) |
+| [MS-MAIL](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-mail/) | Remote Mailslot Protocol (the mailslot write that carries browser frames) | Microsoft | [`ms-mail.pdf`](https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-MAIL/%5bMS-MAIL%5d.pdf) |
 
 ## Web Services Discovery (`truenas_pywsd`)
 
 | Spec | Title | Publisher | Local copy |
 |------|-------|-----------|------------|
-| [WS-Discovery 1.1](http://docs.oasis-open.org/ws-dd/discovery/1.1/os/wsdd-discovery-1.1-spec-os.html) | Web Services Dynamic Discovery | OASIS | [`docs/specs/wsdd-discovery-1.1-spec-os.pdf`](docs/specs/wsdd-discovery-1.1-spec-os.pdf) |
-| [SOAP-over-UDP 1.1](http://docs.oasis-open.org/ws-dd/soapoverudp/1.1/os/wsdd-soapoverudp-1.1-spec-os.html) | SOAP-over-UDP | OASIS | [`docs/specs/wsdd-soapoverudp-1.1-spec-os.pdf`](docs/specs/wsdd-soapoverudp-1.1-spec-os.pdf) |
-| [DPWS 1.1](http://docs.oasis-open.org/ws-dd/dpws/1.1/os/wsdd-dpws-1.1-spec-os.html) | Devices Profile for Web Services | OASIS | [`docs/specs/wsdd-dpws-1.1-spec-os.pdf`](docs/specs/wsdd-dpws-1.1-spec-os.pdf) |
-| [WS-Addressing 1.0 — Core](https://www.w3.org/TR/2006/REC-ws-addr-core-20060509/) | Web Services Addressing (Core) | W3C | [`docs/specs/ws-addr-core.html`](docs/specs/ws-addr-core.html) |
-| [WS-Addressing 1.0 — SOAP Binding](https://www.w3.org/TR/2006/REC-ws-addr-soap-20060509/) | Web Services Addressing (SOAP Binding) | W3C | [`docs/specs/ws-addr-soap.html`](docs/specs/ws-addr-soap.html) |
+| [WS-Discovery 1.1](http://docs.oasis-open.org/ws-dd/discovery/1.1/os/wsdd-discovery-1.1-spec-os.html) | Web Services Dynamic Discovery | OASIS | [`wsdd-discovery-1.1-spec-os.pdf`](http://docs.oasis-open.org/ws-dd/discovery/1.1/os/wsdd-discovery-1.1-spec-os.pdf) |
+| [SOAP-over-UDP 1.1](http://docs.oasis-open.org/ws-dd/soapoverudp/1.1/os/wsdd-soapoverudp-1.1-spec-os.html) | SOAP-over-UDP | OASIS | [`wsdd-soapoverudp-1.1-spec-os.pdf`](http://docs.oasis-open.org/ws-dd/soapoverudp/1.1/os/wsdd-soapoverudp-1.1-spec-os.pdf) |
+| [DPWS 1.1](http://docs.oasis-open.org/ws-dd/dpws/1.1/os/wsdd-dpws-1.1-spec-os.html) | Devices Profile for Web Services | OASIS | [`wsdd-dpws-1.1-spec-os.pdf`](http://docs.oasis-open.org/ws-dd/dpws/1.1/os/wsdd-dpws-1.1-spec-os.pdf) |
+| [WS-Addressing 1.0 — Core](https://www.w3.org/TR/2006/REC-ws-addr-core-20060509/) | Web Services Addressing (Core) | W3C | [`ws-addr-core.html`](https://www.w3.org/TR/2006/REC-ws-addr-core-20060509/) |
+| [WS-Addressing 1.0 — SOAP Binding](https://www.w3.org/TR/2006/REC-ws-addr-soap-20060509/) | Web Services Addressing (SOAP Binding) | W3C | [`ws-addr-soap.html`](https://www.w3.org/TR/2006/REC-ws-addr-soap-20060509/) |
 | [WS-MetadataExchange](http://specs.xmlsoap.org/ws/2004/09/mex/WS-MetadataExchange.pdf) | Web Services Metadata Exchange | xmlsoap.org | — |
-| [MS-PBSD](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-pbsd/) | Publication Services Data Structure (defines `pub:Computer`) | Microsoft | [`docs/specs/ms-pbsd.pdf`](docs/specs/ms-pbsd.pdf) |
-| [MS-DPWSSN](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dpwssn/) | Devices Profile for Web Services (DPWS): Size Negotiation Extension | Microsoft | [`docs/specs/ms-dpwssn.pdf`](docs/specs/ms-dpwssn.pdf) |
+| [MS-PBSD](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-pbsd/) | Publication Services Data Structure (defines `pub:Computer`) | Microsoft | [`ms-pbsd.pdf`](https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-PBSD/%5bMS-PBSD%5d.pdf) |
+| [MS-DPWSSN](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dpwssn/) | Devices Profile for Web Services (DPWS): Size Negotiation Extension | Microsoft | [`ms-dpwssn.pdf`](https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-DPWSSN/%5bMS-DPWSSN%5d.pdf) |
 | [WSDAPI Compliance (index)](https://learn.microsoft.com/en-us/windows/win32/wsdapi/wsdapi-specification-compliance) | Microsoft WSDAPI Specification Compliance | Microsoft | — |
 | [WSDAPI: WS-Discovery Compliance](https://learn.microsoft.com/en-us/windows/win32/wsdapi/ws-discovery-specification-compliance) | Microsoft WSDAPI: per-clause MUST/SHOULD/MAY profile for WS-Discovery 1.1 | Microsoft | — |
 | [WSDAPI: DPWS Compliance](https://learn.microsoft.com/en-us/windows/win32/wsdapi/dpws-specification-compliance) | Microsoft WSDAPI: per-clause MUST/SHOULD/MAY profile for DPWS 1.1 | Microsoft | — |

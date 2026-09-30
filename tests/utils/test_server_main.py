@@ -44,6 +44,37 @@ enabled = false
     assert excinfo.value.code == 0
 
 
+def test_all_disabled_reports_ready_before_exiting(
+    tmp_path, monkeypatch, notify_socket,
+):
+    """Under Type=notify-reload an exit before READY=1 fails the start
+    (result "protocol"), which Restart=on-failure restarts; the clean
+    exit therefore reports readiness first."""
+    conf = _write(tmp_path, """
+[discovery]
+interfaces = eth0
+
+[mdns]
+enabled = false
+
+[netbiosns]
+enabled = false
+
+[wsd]
+enabled = false
+""")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["truenas-discoveryd", "-c", str(conf), "-v"],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+
+    assert excinfo.value.code == 0
+    assert notify_socket.recv(4096) == b"READY=1"
+
+
 def test_missing_config_exits_zero(tmp_path, monkeypatch):
     # Same clean-exit path when the config file is absent entirely —
     # still not a crash, so systemd leaves the unit inactive instead

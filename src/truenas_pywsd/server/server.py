@@ -173,7 +173,8 @@ class WSDServer(ConfigDaemon):
         previous ``apply_config``:
 
         * **full rebuild** — interfaces, IPv4/IPv6 toggle, or
-          ``hostname`` changed, or this is the first SIGHUP.
+          ``hostname`` changed, or no configuration has been applied
+          yet (``_prev_config is None``).
           Hostname change flips ``_endpoint_uuid``, which WSD
           clients treat as a new device — Bye+Hello is the right
           wire behaviour.

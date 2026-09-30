@@ -1,8 +1,9 @@
 """WSD Probe and Resolve responder (WS-Discovery 1.1 s5/s6).
 
 Handles incoming Probe and Resolve messages, responds with
-ProbeMatch and ResolveMatch respectively.  Includes random
-delay before responding to avoid UDP collision.
+ProbeMatch and ResolveMatch respectively.  A ProbeMatch waits a
+random delay first (§5.3.1); a ResolveMatch goes out at once
+(§6.3.1).
 """
 from __future__ import annotations
 
@@ -207,8 +208,8 @@ class WSDResponder:
         Used by both the Probe and Resolve paths of ``handle_message``:
         each response (ProbeMatch or ResolveMatch) runs asynchronously
         so the main receive loop keeps servicing other datagrams while
-        the responder sleeps out the WS-Discovery 1.1 §8.3 jitter
-        window and SOAP-over-UDP 1.1 §3.4 retransmissions.
+        the responder sleeps out the ProbeMatch delay (WS-Discovery
+        1.1 §5.3.1) and the SOAP-over-UDP 1.1 §3.4 retransmissions.
         """
         task = asyncio.get_event_loop().create_task(coro)
         self._tasks.append(task)
@@ -219,7 +220,16 @@ class WSDResponder:
     async def _respond_probe(
         self, relates_to: str, source: tuple,
     ) -> None:
-        """Send ProbeMatch with random delay (WS-Discovery 1.1 s5.3).
+        """Send ProbeMatch after a random delay, then retransmit per
+        SOAP-over-UDP 1.1 §3.4.
+
+        WS-Discovery 1.1 §5.3.1: a Target Service "MUST wait for a
+        timer to elapse after receiving a Probe and before sending a
+        Probe Match", a uniform random delay in
+        ``[0, APP_MAX_DELAY]`` (§3.1.3; ``UDP_UPPER_DELAY`` is the
+        500 ms default), so the many responders to one multicast
+        Probe don't answer in a synchronized burst.  christgau/wsdd
+        sends ProbeMatch immediately; we keep the §5.3.1 wait.
 
         Includes ``<wsd:XAddrs>`` so peers skip the usual follow-up
         multicast Resolve — matches Windows WSDAPI, which ships
@@ -237,12 +247,20 @@ class WSDResponder:
             app_sequence=self._instance_id,
             message_number=self._next_message_number(),
         )
-        await self._send_with_jitter(data, source, "ProbeMatch")
+        await asyncio.sleep(random.uniform(0, UDP_UPPER_DELAY))
+        await self._retransmit_unicast(data, source)
+        logger.debug("ProbeMatch sent to %s", source[0])
 
     async def _respond_resolve(
         self, relates_to: str, source: tuple,
     ) -> None:
-        """Send ResolveMatch with random delay (WS-Discovery 1.1 s6.3).
+        """Send ResolveMatch without an application-level delay.
+
+        WS-Discovery 1.1 §6.3.1: the Resolve Match "MUST be unicast
+        ... without waiting for a timer to elapse".  christgau/wsdd
+        (``WSDHost.handle_packet``) and wsdd-native
+        (``UdpServerImpl::write``) send it immediately as well; only
+        the SOAP-over-UDP 1.1 §3.4 retransmissions are spaced.
 
         Carries the WS-Discovery 1.1 §7 ``<wsd:AppSequence>`` header
         that §6.3 (as constrained for §5.3) requires on a
@@ -253,24 +271,8 @@ class WSDResponder:
             app_sequence=self._instance_id,
             message_number=self._next_message_number(),
         )
-        await self._send_with_jitter(data, source, "ResolveMatch")
-
-    async def _send_with_jitter(
-        self, data: bytes, source: tuple, label: str,
-    ) -> None:
-        """Apply the WS-Discovery 1.1 §8.3 response jitter then
-        retransmit per SOAP-over-UDP 1.1 §3.4.
-
-        §8.3 requires a uniform random delay in
-        ``[0, APP_MAX_DELAY]`` (we use ``UDP_UPPER_DELAY``) before a
-        unicast response to prevent synchronized storms when many
-        responders answer the same Probe.  The delay applies to
-        both ProbeMatch (§5.3) and ResolveMatch (§6.3), which is
-        why both call sites share this helper.
-        """
-        await asyncio.sleep(random.uniform(0, UDP_UPPER_DELAY))
         await self._retransmit_unicast(data, source)
-        logger.debug("%s sent to %s", label, source[0])
+        logger.debug("ResolveMatch sent to %s", source[0])
 
     async def _retransmit_unicast(
         self, data: bytes, addr: tuple,

@@ -29,6 +29,7 @@ implement) live in the per-package READMEs:
 | [RFC 1001](https://datatracker.ietf.org/doc/html/rfc1001) | NetBIOS Service on TCP/UDP: Concepts and Methods | IETF | [`docs/specs/rfc1001.txt`](docs/specs/rfc1001.txt) |
 | [RFC 1002](https://datatracker.ietf.org/doc/html/rfc1002) | NetBIOS Service on TCP/UDP: Detailed Specifications | IETF | [`docs/specs/rfc1002.txt`](docs/specs/rfc1002.txt) |
 | [MS-BRWS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-brws/) | Common Internet File System (CIFS) Browser Protocol | Microsoft | [`docs/specs/ms-brws.pdf`](docs/specs/ms-brws.pdf) |
+| [MS-MAIL](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-mail/) | Remote Mailslot Protocol (the mailslot write that carries browser frames) | Microsoft | [`docs/specs/ms-mail.pdf`](docs/specs/ms-mail.pdf) |
 
 ## Web Services Discovery (`truenas_pywsd`)
 
@@ -159,6 +160,6 @@ commit.
 | Protocol | Reference | Pinned version | Notes |
 |----------|-----------|----------------|-------|
 | mDNS / DNS-SD | [apple-oss-distributions/mDNSResponder](https://github.com/apple-oss-distributions/mDNSResponder) | [`mDNSResponder-2881.0.25`](https://github.com/apple-oss-distributions/mDNSResponder/releases/tag/mDNSResponder-2881.0.25) | Line numbers cited in our code comments (`mDNSCore/mDNS.c:*`, `mDNSPosix/mDNSPosix.c:*`) are against this tag.  Re-verify if bumped. |
-| mDNS / DNS-SD | [avahi/avahi](https://github.com/avahi/avahi) | master (no stable tag pinned) | avahi has not cut a release since 0.8 (2020); we cross-reference `avahi-core/probe-sched.c`, `response-sched.c`, `announce.c`. |
+| mDNS / DNS-SD | [avahi/avahi](https://github.com/avahi/avahi) | [`v0.8`](https://github.com/avahi/avahi/releases/tag/v0.8) | Line numbers cited in our code comments (`avahi-core/*.c:*`) are against this tag, the last stable release (2020; later tags are v0.9 release candidates).  We cross-reference `avahi-core/probe-sched.c`, `response-sched.c`, `announce.c`, `iface.c`, `socket.c`, `dns.c`. |
 | NetBIOS-NS | [samba-team/samba](https://gitlab.com/samba-team/samba) `source4/torture/nbt/` | master | NBT self-tests (`register.c`, `query.c`, `wins.c`, `dgram.c`) used as behavioural reference — we match their expected packet shapes. |
 | WSD | *(none pinned)* | — | OASIS did not publish a reference; we rely on the normative specs + Microsoft's WSDAPI compliance page. |

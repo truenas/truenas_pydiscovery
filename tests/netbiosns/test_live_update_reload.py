@@ -32,10 +32,13 @@ from truenas_pynetbiosns.server.core.nametable import NameTable
 from truenas_pynetbiosns.server.core.release import (
     release_names,
 )
+from truenas_pynetbiosns.server.net.subnet import resolve_subnets
 from truenas_pynetbiosns.server.server import (
     NBNSServer,
     _expected_name_records,
 )
+
+from .conftest import decode_mailslot
 
 
 _LOCAL_IP = IPv4Address("10.0.0.1")
@@ -198,9 +201,8 @@ class TestReloadDispatch:
             rundir=server._config.rundir,
         )
         server.apply_config(new_cfg)
-        # Full rebuild path runs resolve_subnets on the new list.
-        # With no matching interface, it raises ValueError which the
-        # server catches and returns — _subnets stays empty.
+        # The new token matches no local interface, so it is skipped
+        # and the rebuild sets up no subnet.
         asyncio.run(server._reload())
         assert server._subnets == []
 
@@ -217,6 +219,51 @@ class TestReloadDispatch:
         assert any(
             "no config changes" in r.message.lower()
             for r in caplog.records
+        )
+
+    def test_unchanged_resolution_is_not_rebuilt(self, tmp_path, caplog):
+        """``interfaces`` is resolved again on every reload; when it
+        yields the subnets already being served, nothing is rebuilt."""
+        import logging
+        server = _make_server(
+            tmp_path, netbios_name="HOST", workgroup="WG",
+            interfaces=["127.0.0.1"],
+        )
+        server._resolved_subnets = resolve_subnets(["127.0.0.1"])
+        server.apply_config(server._config)
+        with caplog.at_level(logging.INFO):
+            asyncio.run(server._reload())
+        messages = [r.message.lower() for r in caplog.records]
+        assert any("no config changes" in m for m in messages)
+        assert not any("full rebuild" in m for m in messages)
+
+    def test_address_gained_since_startup_is_served(self, tmp_path, caplog):
+        """An interface skipped at startup for want of an IPv4 address
+        is served from the first reload after it has one, although
+        ``interfaces`` did not change (as nmbd's ``reload_interfaces``
+        does).  Without the privilege to bind port 137 the new
+        subnet's transport stays closed, but the rebuild still runs."""
+        import logging
+        server = _make_server(
+            tmp_path, netbios_name="HOST", workgroup="WG",
+            interfaces=["127.0.0.1"],
+        )
+        # What the token resolved to at startup: nothing.
+        server._resolved_subnets = []
+        server.apply_config(server._config)
+
+        async def scenario() -> list:
+            try:
+                await server._reload()
+                return list(server._resolved_subnets)
+            finally:
+                await server._stop()
+
+        with caplog.at_level(logging.INFO):
+            resolved = asyncio.run(scenario())
+        assert resolved == resolve_subnets(["127.0.0.1"])
+        assert any(
+            "full rebuild" in r.message.lower() for r in caplog.records
         )
 
     def test_server_string_change_takes_live_update_path(
@@ -261,6 +308,7 @@ class TestBrowseAnnouncerSetters:
             hostname="HOST",
             workgroup="WG",
             server_string="old",
+            source_ip=_LOCAL_IP,
         )
         # Manually run one send, change, send again — we don't want
         # to race the real _loop() timer.
@@ -281,13 +329,14 @@ class TestBrowseAnnouncerSetters:
             server_string="new", server_type=st,
             announce_interval_ms=60000,
         )
-        assert sent[0] == expected_old
-        assert sent[1] == expected_new
+        assert decode_mailslot(sent[0])["data"] == expected_old
+        assert decode_mailslot(sent[1])["data"] == expected_new
 
     def test_set_hostname_changes_future_announcement_payload(self):
         sent: list[bytes] = []
         ann = BrowseAnnouncer(
             send_fn=sent.append, hostname="OLD", workgroup="WG",
+            source_ip=_LOCAL_IP,
         )
         from truenas_pynetbiosns.protocol.constants import ServerType
         st = ServerType.WORKSTATION | ServerType.SERVER
@@ -298,4 +347,4 @@ class TestBrowseAnnouncerSetters:
             hostname="NEW", workgroup="WG",
             server_type=st, announce_interval_ms=60000,
         )
-        assert sent[0] == expected
+        assert decode_mailslot(sent[0])["data"] == expected

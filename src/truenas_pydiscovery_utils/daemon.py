@@ -2,10 +2,12 @@
 
 Provides ``BaseDaemon``, an async-native base class that manages:
 
-* Graceful shutdown on SIGTERM / SIGINT
-* Config reload on SIGHUP
+* Graceful shutdown on SIGTERM / SIGINT, including during startup
+* Config reload on SIGHUP, deferred while startup or another reload
+  is running
 * Status dump on SIGUSR1
 * Structured start → run → stop lifecycle
+* systemd ``Type=notify-reload`` readiness and reload notifications
 
 Subclasses implement ``_start``, ``_stop``, and optionally
 ``apply_config``, ``_reload``, and ``_write_status``.
@@ -13,9 +15,12 @@ Subclasses implement ``_start``, ``_stop``, and optionally
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 from typing import Any
+
+from .sd_notify import notify_ready, notify_reloading
 
 
 class BaseDaemon:
@@ -45,16 +50,70 @@ class BaseDaemon:
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
         self._shutdown_event = asyncio.Event()
+        # False until ``_start`` returns.  ``_reload`` works on the
+        # state ``_start`` builds, and two reloads must not interleave,
+        # so a SIGHUP that arrives during startup or during a reload
+        # only sets ``_reload_pending``; one reload runs once the
+        # current step has finished.
+        self._started = False
+        self._reload_pending = False
+        self._reload_task: asyncio.Task | None = None
 
     async def run(self) -> None:
-        """Start, run until shutdown signal, then stop."""
+        """Start, run until shutdown signal, then stop.
+
+        Readiness is reported to systemd (``READY=1``, a no-op outside
+        systemd) as soon as the signal handlers are installed, before
+        ``_start`` runs, so systemd's start timeout does not cover the
+        protocols' probing and registration.  From then on a SIGHUP is
+        held until startup completes, and a stop request abandons the
+        rest of startup.  A reload still running at shutdown is
+        cancelled before ``_stop``.
+        """
         loop = asyncio.get_running_loop()
         self._setup_signals(loop)
+        notify_ready()
         try:
-            await self._start(loop)
-            await self._shutdown_event.wait()
+            if await self._start_unless_stopped(loop):
+                self._started = True
+                if (
+                    self._reload_pending
+                    and not self._shutdown_event.is_set()
+                ):
+                    self._reload_pending = False
+                    self._schedule_reload(loop)
+                await self._shutdown_event.wait()
         finally:
+            await self._cancel_reload()
             await self._stop()
+
+    async def _start_unless_stopped(
+        self, loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Run ``_start``, cancelling it if a stop is requested first.
+
+        Returns True if startup completed and False if it was
+        abandoned; an exception raised by ``_start`` propagates.
+        ``_stop`` then tears down whatever was set up.
+        """
+        start = loop.create_task(self._start(loop))
+        stop_requested = loop.create_task(self._shutdown_event.wait())
+        try:
+            await asyncio.wait(
+                {start, stop_requested},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            stop_requested.cancel()
+            if not start.done():
+                self._logger.info("Stop requested during startup")
+                start.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await start
+        if start.cancelled():
+            return False
+        start.result()
+        return True
 
     # -- Hooks for subclasses -----------------------------------------------
 
@@ -100,8 +159,54 @@ class BaseDaemon:
         self._shutdown_event.set()
 
     def _signal_reload(self) -> None:
+        if self._shutdown_event.is_set():
+            self._logger.info("Received SIGHUP while stopping; ignored")
+            return
+        if not self._started or self._reload_in_progress():
+            self._logger.info(
+                "Received SIGHUP during %s; reloading once it completes",
+                "startup" if not self._started else "a reload",
+            )
+            self._reload_pending = True
+            return
         self._logger.info("Received SIGHUP, scheduling reload")
-        asyncio.get_event_loop().create_task(self._reload())
+        self._schedule_reload(asyncio.get_running_loop())
+
+    def _reload_in_progress(self) -> bool:
+        return self._reload_task is not None and not self._reload_task.done()
+
+    def _schedule_reload(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._reload_task = loop.create_task(self._run_reloads())
+
+    async def _run_reloads(self) -> None:
+        """Run ``_reload`` inside the ``Type=notify-reload`` protocol,
+        and once more whenever a SIGHUP was held while it ran.
+
+        Every pass sends ``RELOADING=1`` (with ``MONOTONIC_USEC``)
+        before ``_reload`` and ``READY=1`` after it, so systemd sees a
+        reload finish only once one that began after its signal has
+        completed.  A failed pass is logged and does not stop the next.
+        """
+        while True:
+            notify_reloading()
+            try:
+                await self._reload()
+            except Exception:
+                self._logger.exception("Reload failed")
+            finally:
+                notify_ready()
+            if not self._reload_pending or self._shutdown_event.is_set():
+                return
+            self._reload_pending = False
+
+    async def _cancel_reload(self) -> None:
+        """Cancel a reload still running at shutdown and wait for it."""
+        task = self._reload_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     def _signal_status(self) -> None:
         self._logger.info("Received SIGUSR1, scheduling status write")
@@ -133,8 +238,11 @@ class ConfigDaemon(BaseDaemon):
         super().__init__(logger)
         self._config = config
         # ``None`` until the first ``apply_config`` call; subclasses
-        # use this to diff old vs. new on SIGHUP.  The first SIGHUP
-        # always hits the ``prev is None`` full-rebuild branch.
+        # diff it against ``_config`` on reload and treat ``None`` as
+        # "anything may have changed".  Under a ``CompositeDaemon``
+        # with a config reloader, startup ends by applying the
+        # configuration on disk, so a reload sees ``None`` only if
+        # every re-read so far failed or skipped this daemon.
         self._prev_config: Any = None
 
     def apply_config(self, new_config: Any) -> None:

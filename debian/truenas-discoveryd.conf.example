@@ -27,8 +27,6 @@ enabled = true
 use-ipv4 = yes
 use-ipv6 = yes
 domain-name = local
-cache-entries-max = 4096
-enable-reflector = no
 service-dir = /etc/truenas-discovery/services.d
 
 

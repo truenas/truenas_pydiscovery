@@ -107,6 +107,20 @@ still bind 137/138/3702/5353/5357 and send raw frames. Also:
 `After=network-online.target`, `Restart=on-failure`,
 `ProtectSystem=strict`, `ProtectHome=true`, `NoNewPrivileges=true`.
 
+`Type=notify-reload`: the daemon sends `READY=1` as soon as its signal
+handlers are installed, before the protocols probe and register names,
+so systemd's start timeout does not cover that work; a stop request
+abandons whatever startup has left.  It brackets each SIGHUP reload
+with `RELOADING=1` / `READY=1`, so `systemctl reload` waits for the
+reload to finish.  A SIGHUP that arrives during startup or during
+another reload is held and served by one more reload once that
+finishes.  Startup ends with one reload pass, which applies
+configuration written before `READY=1` (systemd does not signal a
+reload requested before then).  `RestartForceExitStatus=SIGHUP`
+restarts the unit if a SIGHUP ever arrives before the handlers are
+installed.  Requires systemd 253 or later; the package `Breaks:` older
+versions.
+
 ### Configuration
 
 One INI file, one `[discovery]` section for shared fields, and one

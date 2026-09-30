@@ -40,9 +40,12 @@ LAN_V4 = IPv4Address("192.0.2.10")
 LAN_V4_ALT = IPv4Address("192.0.2.11")
 LAN_V6 = IPv6Address("2001:db8:1::10")
 P2P_V4 = IPv4Address("198.51.100.1")
+LINK_LOCAL_V6 = IPv6Address("fe80::10")
 
 LAN_INDEX = 11
 P2P_INDEX = 22
+DUAL_INDEX = 44
+LINK_LOCAL_INDEX = 55
 
 HOST_FQDN = "nas.local"
 
@@ -87,6 +90,11 @@ def _additional_addresses(msg: MDNSMessage) -> set:
         r.data.address for r in msg.additionals
         if r.key.rtype in (QType.A, QType.AAAA)
     }
+
+
+def _host_group(server: MDNSServer, index: int) -> EntryGroup:
+    (group,) = [g for g in server._host_groups if g.interfaces == [index]]
+    return group
 
 
 def _host_names(group: EntryGroup) -> set:
@@ -134,6 +142,42 @@ class TestRegisterHostAddresses:
         assert [g.interfaces for g in server._host_groups] == [
             [LAN_INDEX], [P2P_INDEX],
         ]
+
+    def test_link_local_ipv6_not_published_beside_a_routable_one(
+        self, multihomed, started_state,
+    ):
+        """avahi's ``avahi_interface_address_is_relevant`` rule: a
+        link-local address is left out while the interface also has
+        a routable IPv6 address."""
+        server, loop = multihomed
+        server._interfaces[DUAL_INDEX] = started_state(
+            loop, server._config, InterfaceInfo(
+                name="dual0", index=DUAL_INDEX,
+                addrs_v6=[LINK_LOCAL_V6, LAN_V6],
+            ),
+        )
+        server._register_host_addresses()
+
+        assert _addresses(_host_group(server, DUAL_INDEX)) == {LAN_V6}
+
+    def test_link_local_ipv6_published_when_it_is_the_only_one(
+        self, multihomed, started_state,
+    ):
+        """With no routable IPv6 on the interface, its link-local
+        address is the one IPv6 peers on that link can reach, so it
+        is published (RFC 6762 §6.2)."""
+        server, loop = multihomed
+        server._interfaces[LINK_LOCAL_INDEX] = started_state(
+            loop, server._config, InterfaceInfo(
+                name="ll0", index=LINK_LOCAL_INDEX,
+                addrs_v6=[LINK_LOCAL_V6],
+            ),
+        )
+        server._register_host_addresses()
+
+        assert _addresses(_host_group(server, LINK_LOCAL_INDEX)) == {
+            LINK_LOCAL_V6,
+        }
 
 
 class TestResponderScoping:

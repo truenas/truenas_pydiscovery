@@ -1,8 +1,9 @@
 """Registrar for NetBIOS name registration (RFC 1002 s4.2.2).
 
-Sends REGISTRATION_RETRY_COUNT broadcast packets at
-REGISTRATION_RETRY_INTERVAL apart; if no conflict notification
-arrives before the last packet, the name transitions from pending
+Broadcasts one registration request up to REGISTRATION_RETRY_COUNT
+times, each followed by a REGISTRATION_RETRY_INTERVAL wait (RFC 1002
+s5.1.1.1); if no negative response carrying the request's NAME_TRN_ID
+arrives by the end of the last wait, the name transitions from pending
 to registered in the local NameTable.
 """
 from __future__ import annotations
@@ -14,15 +15,21 @@ from ipaddress import IPv4Address
 
 from truenas_pynetbiosns.protocol.constants import (
     NBFlag,
+    NameType,
     Opcode,
     REGISTRATION_RETRY_COUNT,
     REGISTRATION_RETRY_INTERVAL,
     RRType,
+    Rcode,
 )
 from truenas_pynetbiosns.protocol.message import NBNSMessage
 from truenas_pynetbiosns.protocol.name import NetBIOSName
+from truenas_pynetbiosns.server.config import DaemonConfig, ServerConfig
 from truenas_pynetbiosns.server.core.nametable import NameTable
 from truenas_pynetbiosns.server.core.registrar import Registrar
+from truenas_pynetbiosns.server.net.subnet import NbnsSubnet
+from truenas_pynetbiosns.server.net.transport import NBNSTransport
+from truenas_pynetbiosns.server.server import NBNSServer, PerSubnetState
 
 
 def _run(coro, timeout: float = 3.0) -> object:
@@ -76,13 +83,22 @@ class TestRegisterSuccessPath:
         assert entry.registered is True
         assert IPv4Address("10.0.0.3") in entry.addresses
 
+    def test_every_retransmission_carries_the_same_trn_id(self):
+        """RFC 1002 s5.1.1.1 retransmits one request and matches the
+        response against its transaction id; nmbd resends the same
+        packet (``retransmit_or_expire_response_records``)."""
+        sent, _, reg = _new_pair()
+        _run(reg.register("HOSTF", 0x20, IPv4Address("192.0.2.6")))
+        assert len(sent) == REGISTRATION_RETRY_COUNT
+        assert len({msg.trn_id for msg in sent}) == 1
+
 
 class TestConflictAbortsRegistration:
     def test_conflict_notification_removes_name_and_returns_false(self):
         """A conflict notification received during the registration
         burst must cause ``register`` to return False and drop the
         pending entry from the table."""
-        _, table, reg = _new_pair()
+        sent, table, reg = _new_pair()
         target = NetBIOSName("HOSTD", 0x20)
 
         async def drive() -> bool:
@@ -92,12 +108,137 @@ class TestConflictAbortsRegistration:
             # Allow the first packet to go out, then signal a conflict
             # before the retry burst ends.
             await asyncio.sleep(0.050)
-            reg.on_conflict(target)
+            reg.on_conflict(target, sent[0].trn_id)
             return await task
 
         result = _run(drive())
         assert result is False
         assert table.lookup(target) is None
+
+    def test_conflict_after_last_request_aborts_registration(self):
+        """RFC 1002 s5.1.1.1 pauses BCAST_REQ_RETRY_TIMEOUT after the
+        final request as well, so a negative response to that request
+        still blocks the claim."""
+        table = NameTable()
+        target = NetBIOSName("HOSTE", 0x20)
+        sent: list[NBNSMessage] = []
+
+        def send(msg: NBNSMessage) -> None:
+            sent.append(msg)
+            if len(sent) == REGISTRATION_RETRY_COUNT:
+                asyncio.get_running_loop().call_later(
+                    REGISTRATION_RETRY_INTERVAL / 5,
+                    reg.on_conflict, target, msg.trn_id,
+                )
+
+        reg = Registrar(send, table)
+        result = _run(
+            reg.register("HOSTE", 0x20, IPv4Address("192.0.2.5")),
+        )
+        assert result is False
+        assert table.lookup(target) is None
+
+    def test_negative_response_stops_retransmission(self):
+        """The request is repeated "UNTIL response packet is received"
+        (RFC 1002 s5.1.1.1): after a negative response to the first
+        broadcast, no further request goes out."""
+        sent, table, reg = _new_pair()
+        target = NetBIOSName("HOSTG", 0x20)
+
+        async def drive() -> bool:
+            task = asyncio.create_task(
+                reg.register("HOSTG", 0x20, IPv4Address("192.0.2.7")),
+            )
+            await asyncio.sleep(0.050)
+            reg.on_conflict(target, sent[0].trn_id)
+            return await task
+
+        assert _run(drive()) is False
+        assert len(sent) == 1
+        assert table.lookup(target) is None
+
+    def test_response_with_another_trn_id_is_ignored(self):
+        """RFC 1002 s5.1.1.1: "IF NOT response tid = request tid THEN
+        ignore response packet"."""
+        sent, table, reg = _new_pair()
+        target = NetBIOSName("HOSTH", 0x20)
+
+        async def drive() -> bool:
+            task = asyncio.create_task(
+                reg.register("HOSTH", 0x20, IPv4Address("192.0.2.8")),
+            )
+            await asyncio.sleep(0.050)
+            reg.on_conflict(target, (sent[0].trn_id + 1) & 0xFFFF)
+            return await task
+
+        assert _run(drive()) is True
+        assert len(sent) == REGISTRATION_RETRY_COUNT
+        entry = table.lookup(target)
+        assert entry is not None and entry.registered
+
+
+_MY_IP = IPv4Address("192.0.2.10")
+_DEFENDER = ("192.0.2.20", 137)
+
+
+def _server_with_registrar(tmp_path) -> tuple[NBNSServer, Registrar, list]:
+    """An NBNSServer with one subnet whose registrar's requests are
+    collected in the returned list."""
+    server = NBNSServer(DaemonConfig(
+        server=ServerConfig(netbios_name="NAS01", workgroup="WG"),
+        rundir=tmp_path,
+    ))
+    subnet = NbnsSubnet(
+        interface_name="eth0", interface_index=2, my_ip=_MY_IP,
+        netmask=IPv4Address("255.255.255.0"),
+        broadcast=IPv4Address("192.0.2.255"),
+    )
+    state = PerSubnetState(subnet, NBNSTransport(
+        interface_name="eth0", interface_addr=str(_MY_IP),
+        broadcast_addr=str(subnet.broadcast),
+    ))
+    sent: list[NBNSMessage] = []
+    state.registrar = Registrar(sent.append, state.name_table)
+    server._subnets.append(state)
+    return server, state.registrar, sent
+
+
+class TestNegativeResponseDispatch:
+    """``NBNSServer._handle_message`` passes a negative response's
+    NAME_TRN_ID to the registrar of the subnet it came from."""
+
+    def _register_against(self, tmp_path, trn_id_of) -> tuple[bool, int]:
+        server, registrar, sent = _server_with_registrar(tmp_path)
+
+        async def drive() -> bool:
+            task = asyncio.create_task(
+                registrar.register("NAS01", NameType.SERVER, _MY_IP),
+            )
+            await asyncio.sleep(0.050)
+            server._handle_message(
+                NBNSMessage.build_negative_response(
+                    trn_id_of(sent[0]), "NAS01", NameType.SERVER,
+                    Rcode.ACT_ERR,
+                ),
+                _DEFENDER, "eth0",
+            )
+            return await task
+
+        return bool(_run(drive())), len(sent)
+
+    def test_defence_of_our_request_blocks_the_claim(self, tmp_path):
+        claimed, requests = self._register_against(
+            tmp_path, lambda request: request.trn_id,
+        )
+        assert claimed is False
+        assert requests == 1
+
+    def test_response_to_another_request_is_ignored(self, tmp_path):
+        claimed, requests = self._register_against(
+            tmp_path, lambda request: (request.trn_id + 1) & 0xFFFF,
+        )
+        assert claimed is True
+        assert requests == REGISTRATION_RETRY_COUNT
 
 
 class TestRegistrationWireFormat:

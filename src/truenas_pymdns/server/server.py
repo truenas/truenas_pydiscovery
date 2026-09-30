@@ -120,7 +120,6 @@ class MDNSServer(ConfigDaemon):
         # (RFC 6762 §14).
         self._host_groups: list[EntryGroup] = []
         self._status = StatusWriter(config.rundir, logger)
-        self._wake = asyncio.Event()
         # Tracks in-flight conflict-resolution tasks spawned by
         # _on_conflict() so they can be cancelled on shutdown.
         self._conflict_tasks: list[asyncio.Task] = []
@@ -302,8 +301,6 @@ class MDNSServer(ConfigDaemon):
             self._check_cooperating_responders(message, ifindex)
             self._check_established_conflicts(message, ifindex, source)
 
-        self._wake.set()
-
     # -- Service management ---------------------------------------------------
 
     async def _load_static_services(self) -> None:
@@ -382,6 +379,15 @@ class MDNSServer(ConfigDaemon):
 
         Only registers addresses for address families where the
         transport is actually active.
+
+        IPv6 link-local addresses are published only when the interface
+        has no other IPv6 address, as avahi publishes them
+        (``avahi_interface_address_is_relevant`` in avahi-core/iface.c:702).
+        RFC 6762 §6.2 goes further — for an interface with both a
+        link-local and a routable address, "both should be included" —
+        and mDNSResponder's POSIX port advertises every interface
+        address (``SetupInterfaceList`` in mDNSPosix/mDNSPosix.c); we
+        follow avahi.
         """
         self._host_groups.clear()
         for ifstate in self._interfaces.values():
@@ -390,9 +396,9 @@ class MDNSServer(ConfigDaemon):
                 for v4 in ifstate.iface.addrs_v4:
                     group.add_address(self._fqdn, str(v4))
             if ifstate.transport.has_ipv6:
-                for v6 in ifstate.iface.addrs_v6:
-                    if v6.is_link_local:
-                        continue
+                v6_addrs = ifstate.iface.addrs_v6
+                routable_v6 = [a for a in v6_addrs if not a.is_link_local]
+                for v6 in routable_v6 or v6_addrs:
                     group.add_address(self._fqdn, str(v6))
             if not group.records:
                 continue
@@ -1001,9 +1007,9 @@ class MDNSServer(ConfigDaemon):
         the previous ``apply_config``:
 
         * **full rebuild** — interfaces, IPv4/IPv6 toggle, or the
-          ``disallow-other-stacks`` bind policy changed, or this is
-          the first SIGHUP (``_prev_config is None``).  Transports
-          rebuild, every record goodbyes.
+          ``disallow-other-stacks`` bind policy changed, or no
+          configuration has been applied yet (``_prev_config is
+          None``).  Transports rebuild, every record goodbyes.
         * **service delta** — only ``services.d`` on disk may have
           changed.  Removed services get a targeted goodbye, added
           services probe + announce individually; host A/AAAA
@@ -1039,8 +1045,9 @@ class MDNSServer(ConfigDaemon):
 
         The only path that closes and re-opens sockets.  Fires on
         ``interfaces`` / ``use_ipv4`` / ``use_ipv6`` changes (which
-        require rebinding) and on first SIGHUP (no ``_prev_config``
-        to diff against, so we don't know what changed)."""
+        require rebinding) and when no configuration has been applied
+        yet (no ``_prev_config`` to diff against, so we don't know
+        what changed)."""
         logger.info("Reload: full rebuild")
 
         # Cancel before taking the lock: a rename task holding
@@ -1081,8 +1088,6 @@ class MDNSServer(ConfigDaemon):
             self._register_host_addresses()
 
             await self._probe_and_announce_all()
-
-            self._wake.set()
 
             logger.info(
                 "Full rebuild complete: %d services on %d interfaces",
@@ -1140,8 +1145,6 @@ class MDNSServer(ConfigDaemon):
         self._register_host_addresses()
 
         await self._probe_and_announce_all()
-
-        self._wake.set()
 
         logger.info(
             "Re-registration complete: %d services under %s",
@@ -1266,8 +1269,6 @@ class MDNSServer(ConfigDaemon):
                 key, new_key_to_svc[key],
             )
             await self._probe_and_announce(group)
-
-        self._wake.set()
 
     # -- Status ---------------------------------------------------------------
 

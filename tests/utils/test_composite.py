@@ -148,3 +148,119 @@ class TestFullLifecycle:
         asyncio.run(composite.run())
         assert a.started and a.stopped
         assert b.started and b.stopped
+
+
+class GatedChild(StubChild):
+    """StubChild whose ``_start`` stays in progress until ``gate`` opens."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.gate = asyncio.Event()
+        self.starting = False
+        self.reloads = 0
+
+    async def _start(self, loop):
+        self.starting = True
+        await self.gate.wait()
+        await super()._start(loop)
+
+    async def _reload(self):
+        self.reloads += 1
+        await super()._reload()
+
+
+class TestStartupConfigPass:
+    """systemd folds a reload requested before READY=1 into the start
+    job, so startup itself ends with a reload pass against the
+    configuration on disk."""
+
+    def test_start_with_reloader_ends_with_one_reload(self):
+        a, b = StubChild("a"), StubChild("b")
+        dispatched: list = []
+        comp = CompositeDaemon(
+            logging.getLogger("test.composite"),
+            [(a.name, a), (b.name, b)],
+            config_reloader=lambda: "config-on-disk",
+            config_dispatch=lambda children, cfg: dispatched.append(cfg),
+        )
+
+        async def _run():
+            await comp._start(asyncio.get_running_loop())
+
+        asyncio.run(_run())
+        assert a.started and b.started
+        assert a.reloaded and b.reloaded
+        assert dispatched == ["config-on-disk"]
+
+    def test_start_without_reloader_does_not_reload(self):
+        a = StubChild("a")
+
+        async def _run():
+            await _composite(a)._start(asyncio.get_running_loop())
+
+        asyncio.run(_run())
+        assert a.started
+        assert not a.reloaded
+
+    @pytest.mark.parametrize("failing_step", ["reader", "dispatch"])
+    def test_failed_reread_leaves_children_as_started(self, failing_step):
+        """Without a fresh config there is nothing to apply, and a
+        child reload would only rebuild what startup just built."""
+        a = StubChild("a")
+
+        def fail(*args):
+            raise RuntimeError(f"{failing_step} boom")
+
+        comp = CompositeDaemon(
+            logging.getLogger("test.composite"),
+            [(a.name, a)],
+            config_reloader=(
+                fail if failing_step == "reader" else lambda: "cfg"
+            ),
+            config_dispatch=(
+                fail if failing_step == "dispatch"
+                else lambda children, cfg: None
+            ),
+        )
+
+        async def _run():
+            await comp._start(asyncio.get_running_loop())
+
+        asyncio.run(_run())
+        assert a.started
+        assert not a.reloaded
+        assert comp.reload_failure_counts[failing_step] == 1
+
+    def test_sighup_held_during_startup_replaces_the_pass(
+        self, notify_socket,
+    ):
+        """The reload that serves a SIGHUP held during startup reads
+        the file itself, so the startup pass is skipped rather than
+        run as well."""
+        child = GatedChild("a")
+        reads: list[str] = []
+        comp = CompositeDaemon(
+            logging.getLogger("test.composite"),
+            [(child.name, child)],
+            config_reloader=lambda: reads.append("read") or "cfg",
+            config_dispatch=lambda children, cfg: None,
+        )
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(comp.run())
+            while not child.starting:
+                await asyncio.sleep(0.01)
+            comp._signal_reload()
+            child.gate.set()
+            while comp._reload_task is None:
+                await asyncio.sleep(0.01)
+            await comp._reload_task
+            comp._signal_shutdown()
+            await runner
+
+        asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+        assert reads == ["read"]
+        assert child.reloads == 1
+        assert notify_socket.recv(4096) == b"READY=1"
+        assert notify_socket.recv(4096).startswith(b"RELOADING=1\n")
+        assert notify_socket.recv(4096) == b"READY=1"

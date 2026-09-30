@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
+from ipaddress import IPv4Address
 
 from truenas_pynetbiosns.protocol.constants import (
     BrowseOpcode,
@@ -20,6 +21,10 @@ from truenas_pynetbiosns.server.browse.announcer import (
     BrowseAnnouncer,
     build_host_announcement,
 )
+
+from .conftest import decode_mailslot
+
+_SOURCE_IP = IPv4Address("192.0.2.10")
 
 
 def _parse_host_announcement(payload: bytes) -> dict:
@@ -115,7 +120,7 @@ class TestAnnouncerSchedule:
         """MS-BRWS §3.2.6: initial burst of ANNOUNCE_COUNT_STARTUP
         frames, each payload tagged with its own Periodicity."""
         sent: list[bytes] = []
-        a = BrowseAnnouncer(sent.append, "HOSTA", "WG")
+        a = BrowseAnnouncer(sent.append, "HOSTA", "WG", source_ip=_SOURCE_IP)
 
         async def drive() -> None:
             a.start()
@@ -126,12 +131,12 @@ class TestAnnouncerSchedule:
 
         _run(drive())
         assert len(sent) >= 1
-        d = _parse_host_announcement(sent[0])
+        d = _parse_host_announcement(decode_mailslot(sent[0])["data"])
         assert d["hostname"] == "HOSTA"
 
     def test_periodicity_matches_current_delay(self):
         sent: list[bytes] = []
-        a = BrowseAnnouncer(sent.append, "HOSTB", "WG")
+        a = BrowseAnnouncer(sent.append, "HOSTB", "WG", source_ip=_SOURCE_IP)
 
         async def drive() -> None:
             a.start()
@@ -140,7 +145,7 @@ class TestAnnouncerSchedule:
 
         _run(drive())
         assert sent
-        d = _parse_host_announcement(sent[0])
+        d = _parse_host_announcement(decode_mailslot(sent[0])["data"])
         # First-burst periodicity equals ANNOUNCE_INTERVAL_INITIAL
         # (seconds) in milliseconds.
         from truenas_pynetbiosns.protocol.constants import (
@@ -151,14 +156,16 @@ class TestAnnouncerSchedule:
         )
 
     def test_cancel_before_start_is_safe(self):
-        a = BrowseAnnouncer(lambda _: None, "HOSTA", "WG")
+        a = BrowseAnnouncer(
+            lambda _: None, "HOSTA", "WG", source_ip=_SOURCE_IP,
+        )
         a.cancel()  # must not raise
 
     def test_cancel_stops_announcement_loop(self):
         """After cancel(), no further packets should fire even if we
         wait past the next scheduled interval."""
         sent: list[bytes] = []
-        a = BrowseAnnouncer(sent.append, "HOSTA", "WG")
+        a = BrowseAnnouncer(sent.append, "HOSTA", "WG", source_ip=_SOURCE_IP)
 
         async def drive() -> None:
             a.start()

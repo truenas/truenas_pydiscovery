@@ -48,10 +48,19 @@ class TestInterfaceName:
         ips = {str(s.my_ip) for s in subnets}
         assert ips == {"10.0.0.5", "192.168.1.5"}
 
-    def test_unknown_name_raises(self):
+    def test_name_without_ipv4_is_skipped(self, caplog):
+        """An interface with no IPv4 address (down, unused, or absent)
+        is skipped with a warning and the other tokens still resolve,
+        as Samba's ``interpret_interface`` does."""
         probed = [_p("eth0", "10.0.0.5")]
-        with pytest.raises(ValueError, match="interface not found"):
-            resolve_subnets(["eth9"], probed)
+        subnets = resolve_subnets(["eth9", "eth0"], probed)
+        assert [s.interface_name for s in subnets] == ["eth0"]
+        assert "no IPv4 address on eth9" in caplog.text
+
+    def test_no_resolvable_token_yields_no_subnets(self, caplog):
+        probed = [_p("eth0", "10.0.0.5")]
+        assert resolve_subnets(["eth8", "eth9"], probed) == []
+        assert "no configured interface has an IPv4 address" in caplog.text
 
 
 class TestBareIP:
@@ -64,12 +73,11 @@ class TestBareIP:
         assert len(subnets) == 1
         assert subnets[0].interface_name == "eth0"
 
-    def test_unowned_ip_raises(self):
+    def test_unowned_ip_is_skipped(self, caplog):
         probed = [_p("eth0", "10.0.0.5")]
-        with pytest.raises(
-            ValueError, match="no local interface owns"
-        ):
-            resolve_subnets(["10.99.99.99"], probed)
+        subnets = resolve_subnets(["10.99.99.99", "10.0.0.5"], probed)
+        assert [str(s.my_ip) for s in subnets] == ["10.0.0.5"]
+        assert "no local interface owns 10.99.99.99" in caplog.text
 
 
 class TestCIDR:
@@ -91,12 +99,11 @@ class TestCIDR:
         assert subnets[0].netmask == IPv4Address("255.255.0.0")
         assert subnets[0].broadcast == IPv4Address("10.0.255.255")
 
-    def test_cidr_with_no_local_match_raises(self):
+    def test_cidr_with_no_local_match_is_skipped(self, caplog):
         probed = [_p("eth0", "10.0.0.5")]
-        with pytest.raises(
-            ValueError, match="no local interface has an address in"
-        ):
-            resolve_subnets(["192.168.99.0/24"], probed)
+        subnets = resolve_subnets(["192.168.99.0/24", "eth0"], probed)
+        assert [s.interface_name for s in subnets] == ["eth0"]
+        assert "no local address in 192.168.99.0/24" in caplog.text
 
 
 class TestMixedAndDedup:

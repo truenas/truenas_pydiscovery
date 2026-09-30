@@ -5,9 +5,8 @@ mDNS/DNS-SD server module — runs as a child of the unified
 
 ## Modules
 
-- `server.py` — top-level orchestrator. Manages per-interface state (transport, cache, schedulers), loads service files, handles probing/announcing, runs maintenance loop. Drives SIGTERM/SIGINT shutdown, SIGHUP reload, SIGUSR1 status dump via the `BaseDaemon` contract; signals are received by the parent composite.
+- `server.py` — top-level orchestrator. Manages per-interface state (transport, responder, prober, announcer), loads service files, handles probing/announcing and conflict resolution, re-probes on link up. Drives SIGTERM/SIGINT shutdown, SIGHUP reload, SIGUSR1 status dump via the `BaseDaemon` contract; signals are received by the parent composite. `status.json` is written atomically to rundir by `truenas_pydiscovery_utils.status.StatusWriter`.
 - `config.py` — `DaemonConfig` dataclass + helpers. The unified loader in `truenas_pydiscovery.config` reads the `[mdns]` section into this dataclass.
-- `status.py` — writes `status.json` atomically to rundir on demand.
 
 Wire protocol types (`MDNSMessage`, `MDNSRecord`, etc.) live in the shared [`truenas_pymdns.protocol`](../protocol/README.md) package.
 
@@ -31,9 +30,6 @@ domain-name = local
 use-ipv4 = yes
 use-ipv6 = yes
 disallow-other-stacks = yes
-cache-entries-max = 4096
-ratelimit-interval-usec = 1000000
-ratelimit-burst = 1000
 service-dir = /etc/truenas-discovery/services.d
 ```
 
@@ -89,7 +85,7 @@ interfaces = eth0
 
 ## Subpackages
 
-- [core/](core/README.md) — protocol state machines: cache, probing, announcing, conflict resolution
+- [core/](core/README.md) — protocol state machines: probing, announcing, conflict resolution, goodbye
 - [net/](net/README.md) — multicast sockets, interface resolution, asyncio transport
-- [query/](query/README.md) — query batching and response scheduling
+- [query/](query/README.md) — incoming query handling and response scheduling
 - [service/](service/README.md) — service file loading and authoritative record registry

@@ -42,7 +42,7 @@ On startup, for each configured name (primary + aliases), the daemon registers:
 - `HOSTNAME<0x20>` — file server service (unique)
 - `WORKGROUP<0x00>` — workgroup name (group)
 
-Registration uses B-node broadcast: 3 packets at 250ms intervals on port 137. If no negative response is received, the name is considered registered.
+Registration uses B-node broadcast: 3 packets on port 137, each followed by a 250ms wait (RFC 1002 §5.1.1.1). If no negative response has arrived by the end of the last wait, the name is considered registered.
 
 ## Subpackages
 

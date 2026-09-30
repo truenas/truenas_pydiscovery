@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import gc
 import time
+import warnings
 from ipaddress import IPv4Address
 
 from truenas_pymdns.protocol.constants import (
@@ -52,10 +54,8 @@ def _run(coro, timeout: float = 3.0) -> object:
 
     After the main coroutine finishes, cancel any still-pending tasks
     (typically the aggregated ``_run_probe_cycle`` task still in its
-    post-probe wait window) and drive the loop until they complete.
-    Otherwise those tasks leak into GC in a later test, which raises
-    ``GeneratorExit`` inside their finally block and emits a
-    ``coroutine was never awaited`` RuntimeWarning.
+    post-probe wait window) and drive the loop until they complete,
+    so no task outlives the loop it was created on.
     """
     loop = asyncio.new_event_loop()
     try:
@@ -468,3 +468,48 @@ class TestTaskCancellation:
             return await task
 
         assert _run(scenario()) is False
+
+
+class TestCycleClosedOutsideLoop:
+    """A probe cycle whose coroutine is closed while no loop is running
+    — as GC closes the coroutine of a task abandoned with its loop —
+    has nothing to schedule a follow-up cycle on."""
+
+    def test_pending_sessions_dropped_without_unawaited_coroutine(self):
+        p = _prober()
+        loop = asyncio.new_event_loop()
+        try:
+            async def start() -> None:
+                asyncio.get_running_loop().create_task(
+                    p.probe([_a("orphan.local", "192.0.2.1")]),
+                )
+                # The first yield runs probe() up to queueing its
+                # session and scheduling the cycle; the second lets
+                # the cycle park in its s8.1 initial jitter.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+            loop.run_until_complete(start())
+            cycle = p._probe_task
+            assert cycle is not None and not cycle.done()
+            assert p._pending_sessions
+
+            asyncio.set_event_loop(None)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cycle.get_coro().close()
+                gc.collect()
+
+            assert not [
+                w for w in caught if "never awaited" in str(w.message)
+            ]
+            assert p._probe_task is None
+            assert p._pending_sessions == []
+        finally:
+            leftovers = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in leftovers:
+                task.cancel()
+            loop.run_until_complete(
+                asyncio.gather(*leftovers, return_exceptions=True)
+            )
+            loop.close()

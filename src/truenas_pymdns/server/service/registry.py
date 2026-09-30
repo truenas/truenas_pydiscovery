@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class ServiceRegistry:
     """Stores all records this server is authoritative for.
 
-    Distinct from the cache (which stores records learned from the network).
+    This is the daemon's only record store: it keeps no cache of
+    records learned from the network.
     Lookup returns OwnedRecord wrappers so the Responder can read/write
     per-record scheduling state (last_multicast, last_peer_answer) in
     place, instead of keeping a side dict that would need pruning.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+from ipaddress import IPv4Address
 from typing import Callable
 
 from truenas_pynetbiosns.protocol.constants import (
@@ -32,9 +33,12 @@ from truenas_pynetbiosns.protocol.constants import (
     BROWSER_VERSION_MAJOR,
     BROWSER_VERSION_MINOR,
     BrowseOpcode,
+    MAILSLOT_BROWSE,
     NETBIOS_NAME_LENGTH,
+    NameType,
     ServerType,
 )
+from truenas_pynetbiosns.protocol.datagram import build_mailslot_datagram
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +207,13 @@ def build_host_announcement(
 
 
 class BrowseAnnouncer:
-    """Sends periodic host announcements on port 138."""
+    """Sends periodic host announcements on port 138.
+
+    Each announcement goes to the local master browser name
+    ``<workgroup>[0x1D]`` as a mailslot datagram
+    (``build_mailslot_datagram``) whose SOURCE_IP is *source_ip*, the
+    address of the subnet it is broadcast on.
+    """
 
     def __init__(
         self,
@@ -211,11 +221,14 @@ class BrowseAnnouncer:
         hostname: str,
         workgroup: str,
         server_string: str = "",
+        *,
+        source_ip: IPv4Address,
     ) -> None:
         self._send = send_fn
         self._hostname = hostname
         self._workgroup = workgroup
         self._server_string = server_string
+        self._source_ip = source_ip
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -284,5 +297,17 @@ class BrowseAnnouncer:
             server_type=server_type,
             announce_interval_ms=interval_s * 1000,
         )
-        self._send(payload)
+        # From <hostname>[0x00] to <workgroup>[0x1D] on \MAILSLOT\BROWSE,
+        # as Samba nmbd's ``send_host_announcement`` sends it.  MS-BRWS
+        # §2.2.1 says a server SHOULD use \MAILSLOT\LANMAN; §2.1 has
+        # browsers accept either mailslot.
+        self._send(build_mailslot_datagram(
+            payload,
+            mailslot=MAILSLOT_BROWSE,
+            source_name=self._hostname,
+            source_type=NameType.WORKSTATION,
+            dest_name=self._workgroup,
+            dest_type=NameType.LOCAL_MASTER,
+            source_ip=self._source_ip,
+        ))
         logger.debug("Host announcement sent for %s", self._hostname)

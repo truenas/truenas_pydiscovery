@@ -172,12 +172,17 @@ DNS_MAX_LABEL_LENGTH = 63
 # ---------------------------------------------------------------------------
 
 # Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT)
+# nmbd instead resends a broadcast request 3 times after the first, one
+# time(NULL) second apart (``make_response_record`` in
+# source3/nmbd/nmbd_responserecordsdb.c).
 REGISTRATION_RETRY_COUNT = 3
 REGISTRATION_RETRY_INTERVAL = 0.250   # 250ms between retries
 
-# A datagram seen again within this window is the second socket's copy
-# of one delivery, not a retransmission: retransmitted requests reuse
-# their NAME_TRN_ID but come BCAST_REQ_RETRY_TIMEOUT (250 ms) apart.
+# A datagram seen again within this window is taken for the second
+# socket's copy of one delivery.  Retransmitted requests reuse their
+# NAME_TRN_ID; RFC 1002 spaces them BCAST_REQ_RETRY_TIMEOUT (250 ms)
+# apart, outside the window, but nmbd's first resend can fall inside
+# it (see ``PacketDedup``).
 DUPLICATE_PACKET_WINDOW = 0.100
 
 # Name refresh (RFC 1002 s6)

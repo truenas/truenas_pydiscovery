@@ -34,11 +34,16 @@ from truenas_pynetbiosns.protocol.constants import DUPLICATE_PACKET_WINDOW
 
 
 class PacketDedup:
-    """Remembers recently dispatched packet keys for a short window."""
+    """Remembers recently dispatched packet keys for a short window.
+
+    Each ``is_duplicate`` call first evicts keys older than the window,
+    so the table holds only the last window's keys.
+    """
 
     def __init__(self, window: float = DUPLICATE_PACKET_WINDOW) -> None:
         self._window = window
-        # Insertion order is arrival order, so expiry pops from the front.
+        # Insertion order is arrival order and a repeat keeps its first
+        # timestamp, so expiry pops from the front.
         self._seen: OrderedDict[Hashable, float] = OrderedDict()
 
     def is_duplicate(self, key: Hashable) -> bool:

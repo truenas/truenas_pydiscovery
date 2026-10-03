@@ -97,7 +97,9 @@ class NBNSServer(ConfigDaemon):
         # (``source3/nmbd/nmbd.c``).
         self._global_recv: NBNSGlobalReceiver | None = None
         # A subnet broadcast reaches both the subnet's broadcast socket
-        # and ``_global_recv``; this drops the second copy.
+        # and ``_global_recv``; this drops the second copy.  Its lookups
+        # evict keys older than ``DUPLICATE_PACKET_WINDOW``, so it needs
+        # no clearing.
         self._dedup = PacketDedup()
         self._status = StatusWriter(config.rundir, logger)
 

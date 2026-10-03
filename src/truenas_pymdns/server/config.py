@@ -22,7 +22,6 @@ Unified daemon config (the sole production path):
     use-ipv4 = yes
     use-ipv6 = yes
     disallow-other-stacks = yes
-    cache-entries-max = 4096
     service-dir = /etc/truenas-discovery/services.d
 
 Per-service file format
@@ -47,7 +46,6 @@ from pathlib import Path
 
 from truenas_pydiscovery_utils.interface_tokens import require_names_only
 from truenas_pymdns.protocol.constants import (
-    DEFAULT_CACHE_MAX_ENTRIES,
     MAX_UINT16,
 )
 
@@ -60,11 +58,6 @@ DEFAULT_CONFIG_PATH = Path(
     "/etc/truenas-discovery/truenas-discoveryd.conf",
 )
 
-# Bounds for config values parsed from INI files
-_MIN_CACHE_ENTRIES = 64
-_MAX_CACHE_ENTRIES = 1_000_000
-_MAX_RATELIMIT_INTERVAL_USEC = 60_000_000
-_MAX_RATELIMIT_BURST = 100_000
 DEFAULT_SERVICE_DIR = Path("/etc/truenas-discovery/services.d")
 DEFAULT_RUNDIR = Path("/run/truenas-discovery/mdns")
 
@@ -93,25 +86,15 @@ class ServerConfig:
     # avahi or systemd-resolved mDNS listener can't answer alongside
     # this daemon — see ``create_v4_socket``.
     disallow_other_stacks: bool = True
-    cache_entries_max: int = DEFAULT_CACHE_MAX_ENTRIES
-    ratelimit_interval_usec: int = 1_000_000
-    ratelimit_burst: int = 1000
 
     def __post_init__(self) -> None:
         require_names_only(self.interfaces)
 
 
 @dataclass(slots=True)
-class ReflectorConfig:
-    """Configuration for cross-interface mDNS reflector mode."""
-    enable_reflector: bool = False
-
-
-@dataclass(slots=True)
 class DaemonConfig:
     """Top-level daemon configuration aggregating all config sections."""
     server: ServerConfig = field(default_factory=ServerConfig)
-    reflector: ReflectorConfig = field(default_factory=ReflectorConfig)
     service_dir: Path = DEFAULT_SERVICE_DIR
     rundir: Path = DEFAULT_RUNDIR
 
@@ -177,14 +160,6 @@ def generate_daemon_config(config: DaemonConfig) -> bytes:
     cp.set("server", "use-ipv6", _bool_str(s.use_ipv6))
     cp.set("server", "disallow-other-stacks",
            _bool_str(s.disallow_other_stacks))
-    cp.set("server", "cache-entries-max", str(s.cache_entries_max))
-    cp.set("server", "ratelimit-interval-usec",
-           str(s.ratelimit_interval_usec))
-    cp.set("server", "ratelimit-burst", str(s.ratelimit_burst))
-
-    cp.add_section("reflector")
-    cp.set("reflector", "enable-reflector",
-           _bool_str(config.reflector.enable_reflector))
 
     cp.add_section("paths")
     cp.set("paths", "service-dir", str(config.service_dir))
@@ -273,28 +248,6 @@ def load_daemon_config(
         if "disallow-other-stacks" in s:
             cfg.server.disallow_other_stacks = _parse_bool(
                 s["disallow-other-stacks"]
-            )
-        if "cache-entries-max" in s:
-            val = int(s["cache-entries-max"])
-            cfg.server.cache_entries_max = max(
-                _MIN_CACHE_ENTRIES, min(val, _MAX_CACHE_ENTRIES)
-            )
-        if "ratelimit-interval-usec" in s:
-            val = int(s["ratelimit-interval-usec"])
-            cfg.server.ratelimit_interval_usec = max(
-                0, min(val, _MAX_RATELIMIT_INTERVAL_USEC)
-            )
-        if "ratelimit-burst" in s:
-            val = int(s["ratelimit-burst"])
-            cfg.server.ratelimit_burst = max(
-                1, min(val, _MAX_RATELIMIT_BURST)
-            )
-
-    if cp.has_section("reflector"):
-        r = cp["reflector"]
-        if "enable-reflector" in r:
-            cfg.reflector.enable_reflector = _parse_bool(
-                r["enable-reflector"]
             )
 
     if cp.has_section("paths"):

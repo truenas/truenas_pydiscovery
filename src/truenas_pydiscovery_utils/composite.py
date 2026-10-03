@@ -76,12 +76,6 @@ class CompositeDaemon(BaseDaemon):
         self._config_reloader = config_reloader
         self._config_dispatch = config_dispatch
         self._pidfile = pidfile
-        # True while a reload is in flight.  SIGHUPs arriving during
-        # that window are dropped with a log line — the simpler
-        # alternative to queueing, which would require carrying
-        # pending-config state across iterations.  Operators who
-        # edit config during a reload re-send SIGHUP.
-        self._reload_running = False
         # Failure counters observable by operators via
         # ``reload_failure_counts`` (or direct attribute access).
         # Distinguishing the two failure sites matters: a reloader
@@ -98,7 +92,19 @@ class CompositeDaemon(BaseDaemon):
     async def _start(
         self, loop: asyncio.AbstractEventLoop,
     ) -> None:
-        """Start every child concurrently.  One failing doesn't abort others."""
+        """Start every child concurrently.  One failing doesn't abort others.
+
+        With a *config_reloader* wired, startup ends with one reload
+        pass against the configuration on disk.  systemd folds a
+        reload requested before ``READY=1`` into the start job and
+        never delivers its signal, so this pass is what applies a
+        change written after the configuration was first read.  An
+        unchanged configuration makes every child's reload a no-op.
+
+        The pass is skipped while ``BaseDaemon`` holds a SIGHUP: the
+        reload that serves it next reads the file itself.  If the
+        re-read or the dispatch fails, the children are not reloaded
+        and keep the configuration they started with."""
         self._logger.info(
             "Starting composite daemon with children: %s",
             ", ".join(name for name, _ in self._children),
@@ -113,6 +119,9 @@ class CompositeDaemon(BaseDaemon):
                     "Child %s failed to start: %s", name, res,
                 )
         self._write_pidfile()
+        if self._config_reloader is not None and not self._reload_pending:
+            if await self._refresh_child_configs():
+                await self._reload_children()
 
     async def _stop(self) -> None:
         """Stop every child concurrently.  Errors are logged, not re-raised."""
@@ -152,45 +161,33 @@ class CompositeDaemon(BaseDaemon):
         """Re-read config (if a reloader is wired up) and fan SIGHUP
         out to every child.
 
-        A SIGHUP that arrives while another reload is in flight is
-        logged and dropped — queueing would require carrying
-        pending-config state across iterations to avoid the
-        ``apply_config`` interleaving race (SIGHUP N+1's apply
-        overwriting the ``_prev_config`` that SIGHUP N's
-        ``child._reload`` is about to diff), and concurrent reloads
-        would race on each child's ``_interfaces`` / ``_registry``
-        state.  Dropping is simpler and has a clear operator-
-        facing contract: if you edit config during a reload, send
-        another SIGHUP when the current one finishes."""
-        if self._reload_running:
-            self._logger.info(
-                "SIGHUP arrived during in-flight reload — dropped; "
-                "resend once the current reload completes",
-            )
-            return
+        Reloads never overlap: ``BaseDaemon`` holds a SIGHUP that
+        arrives during one and serves it with one more reload once
+        the current one finishes, so one reload's ``apply_config``
+        cannot overwrite the ``_prev_config`` another child reload is
+        about to diff."""
+        if self._config_reloader is not None:
+            await self._refresh_child_configs()
+        await self._reload_children()
 
-        self._reload_running = True
-        try:
-            if self._config_reloader is not None:
-                await self._refresh_child_configs()
-            results = await asyncio.gather(
-                *(child._reload() for _, child in self._children),
-                return_exceptions=True,
-            )
-            for (name, _), res in zip(self._children, results):
-                if isinstance(res, BaseException):
-                    self._logger.error(
-                        "Child %s failed to reload: %s", name, res,
-                    )
-        finally:
-            self._reload_running = False
+    async def _reload_children(self) -> None:
+        results = await asyncio.gather(
+            *(child._reload() for _, child in self._children),
+            return_exceptions=True,
+        )
+        for (name, _), res in zip(self._children, results):
+            if isinstance(res, BaseException):
+                self._logger.error(
+                    "Child %s failed to reload: %s", name, res,
+                )
 
-    async def _refresh_child_configs(self) -> None:
+    async def _refresh_child_configs(self) -> bool:
         """Invoke the config reloader + dispatcher before fan-out.
 
-        Errors from either step are logged and counted — we still
-        fan SIGHUP out so children can re-probe interfaces etc.,
-        just with whatever config they already have.  Counters on
+        Returns True if the fresh config was read and dispatched.
+        Errors from either step are logged and counted — a SIGHUP
+        reload still fans out so children can re-probe interfaces
+        etc., just with whatever config they already have.  Counters on
         ``self._reload_reader_failures`` /
         ``self._reload_dispatch_failures`` give operators a
         runtime signal beyond log scraping: the log already shows
@@ -199,7 +196,7 @@ class CompositeDaemon(BaseDaemon):
         times since start" even when nobody's tailing the log."""
         reloader = self._config_reloader
         if reloader is None:
-            return
+            return False
         loop = asyncio.get_running_loop()
         try:
             new_config = await loop.run_in_executor(None, reloader)
@@ -212,9 +209,9 @@ class CompositeDaemon(BaseDaemon):
                 "config (total reader failures: %d)",
                 self._reload_reader_failures,
             )
-            return
+            return False
         if self._config_dispatch is None:
-            return
+            return False
         try:
             self._config_dispatch(self._children, new_config)
         except Exception as e:
@@ -226,6 +223,8 @@ class CompositeDaemon(BaseDaemon):
                 "config (total dispatch failures: %d)",
                 self._reload_dispatch_failures,
             )
+            return False
+        return True
 
     @property
     def reload_failure_counts(self) -> dict[str, int]:

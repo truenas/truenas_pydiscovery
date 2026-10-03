@@ -161,8 +161,10 @@ def parse_nb_rdata(rdata: bytes) -> list[tuple[NBFlag, IPv4Address]]:
 # ---------------------------------------------------------------------------
 
 
-def _gen_trn_id() -> int:
+def gen_trn_id() -> int:
     """Return a fresh 16-bit NAME_TRN_ID (RFC 1002 §4.2.1.1).
+
+    The datagram service draws its DGM_ID (§4.4.1) here as well.
 
     The RFC only requires that the transaction ID "uniquely
     identify" a name-service transaction — a monotonic counter
@@ -317,7 +319,7 @@ class NBNSMessage:
         if broadcast:
             flags |= HeaderFlags.BROADCAST
         return cls(
-            trn_id=_gen_trn_id(),
+            trn_id=gen_trn_id(),
             opcode=Opcode.QUERY,
             flags=flags,
             questions=[NBQuestion(
@@ -345,7 +347,7 @@ class NBNSMessage:
         nb_flags = NBFlag.GROUP if group else NBFlag(0)
         nb_name = NetBIOSName(name, name_type, scope)
         return cls(
-            trn_id=_gen_trn_id(),
+            trn_id=gen_trn_id(),
             opcode=Opcode.REGISTRATION,
             flags=flags,
             questions=[NBQuestion(name=nb_name, q_type=RRType.NB)],
@@ -375,7 +377,7 @@ class NBNSMessage:
         nb_flags = NBFlag.GROUP if group else NBFlag(0)
         nb_name = NetBIOSName(name, name_type, scope)
         return cls(
-            trn_id=_gen_trn_id(),
+            trn_id=gen_trn_id(),
             opcode=Opcode.RELEASE,
             flags=flags,
             questions=[NBQuestion(name=nb_name, q_type=RRType.NB)],
@@ -406,7 +408,7 @@ class NBNSMessage:
         nb_flags = NBFlag.GROUP if group else NBFlag(0)
         nb_name = NetBIOSName(name, name_type, scope)
         return cls(
-            trn_id=_gen_trn_id(),
+            trn_id=gen_trn_id(),
             opcode=Opcode.REFRESH,
             flags=flags,
             questions=[NBQuestion(name=nb_name, q_type=RRType.NB)],
@@ -479,7 +481,7 @@ class NBNSMessage:
     ) -> NBNSMessage:
         """Build a node status query (NBSTAT, RFC 1002 s4.2.17)."""
         return cls(
-            trn_id=_gen_trn_id(),
+            trn_id=gen_trn_id(),
             opcode=Opcode.QUERY,
             flags=HeaderFlags(0),
             questions=[NBQuestion(

@@ -325,17 +325,21 @@ class Prober:
                     self._pending_sessions.append(s)
             raise
         finally:
-            # If the event loop is already closed (tests tear-down
-            # between cycles), we can't schedule anything — just
-            # drop state and return.
+            # With no running loop (this coroutine is being closed
+            # after its loop went away) nothing can be scheduled, so
+            # the pending sessions are dropped.  The loop is looked up
+            # before the chained coroutine is created, so no coroutine
+            # is ever left unawaited.
             if self._pending_sessions:
                 try:
-                    self._probe_task = asyncio.ensure_future(
-                        self._run_probe_cycle()
-                    )
+                    loop = asyncio.get_running_loop()
                 except RuntimeError:
                     self._probe_task = None
                     self._pending_sessions.clear()
+                else:
+                    self._probe_task = loop.create_task(
+                        self._run_probe_cycle()
+                    )
             else:
                 self._probe_task = None
 

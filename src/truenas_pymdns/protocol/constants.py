@@ -63,7 +63,7 @@ DNS_MAX_UDP_PAYLOAD = 9000
 CLASS_CACHE_FLUSH = 0x8000
 
 # ---------------------------------------------------------------------------
-# TTL values (RFC 6762 s11)
+# TTL values (RFC 6762 s10)
 #
 # Records relating to hostnames (A, AAAA, SRV, reverse-PTR):
 #   RFC recommends 120s; Apple mDNSResponder moved to 4500s to reduce
@@ -157,9 +157,6 @@ MDNS_TTL = 255
 
 # Max TXT entry length (RFC 6763 s6.2): single length-prefixed string
 TXT_MAX_ENTRY_LENGTH = 255
-
-# Default maximum cache entries per interface
-DEFAULT_CACHE_MAX_ENTRIES = 4096
 
 # DNS name compression: max pointer offset is 14 bits (RFC 1035 s4.1.4)
 DNS_COMPRESSION_MAX_OFFSET = 0x3FFF

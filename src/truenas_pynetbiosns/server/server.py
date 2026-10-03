@@ -15,11 +15,13 @@ from .core.nametable import NameTable
 from .core.refresher import Refresher
 from .core.registrar import Registrar
 from .core.release import NameRecord, release_all_names, release_names
+from .net.dedup import PacketDedup
 from .net.global_receiver import NBNSGlobalReceiver
 from .net.subnet import NbnsSubnet, resolve_subnets
 from .net.transport import NBNSTransport
 from .query.responder import Responder
 from truenas_pynetbiosns.protocol.constants import (
+    DGRAM_PORT,
     NBNS_PORT,
     NameType,
     Opcode,
@@ -85,12 +87,20 @@ class NBNSServer(ConfigDaemon):
         self._transports: dict[str, NBNSTransport] = {}
         # One PerSubnetState per NbnsSubnet resolved from config
         self._subnets: list[PerSubnetState] = []
+        # What ``interfaces`` resolved to when ``_subnets`` was built,
+        # including any subnet whose transport then failed to open.
+        self._resolved_subnets: list[NbnsSubnet] = []
         # Daemon-level catchall receiver on (0.0.0.0, 137/138) for
         # limited broadcasts and anything not matching a per-interface
         # specific-IP bind.  Mirrors Samba 4.23's ``ClientNMB`` /
         # ``ClientDGRAM`` in ``open_sockets``
         # (``source3/nmbd/nmbd.c``).
         self._global_recv: NBNSGlobalReceiver | None = None
+        # A subnet broadcast reaches both the subnet's broadcast socket
+        # and ``_global_recv``; this drops the second copy.  Its lookups
+        # evict keys older than ``DUPLICATE_PACKET_WINDOW``, so it needs
+        # no clearing.
+        self._dedup = PacketDedup()
         self._status = StatusWriter(config.rundir, logger)
 
     async def _start(self, loop) -> None:
@@ -113,6 +123,7 @@ class NBNSServer(ConfigDaemon):
             self._shutdown_event.set()
             return
 
+        self._resolved_subnets = subnets
         for subnet in subnets:
             await self._setup_subnet(subnet, loop)
 
@@ -167,25 +178,43 @@ class NBNSServer(ConfigDaemon):
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
 
-        Picks one of two paths based on what changed since the
-        previous ``apply_config``:
+        Resolves ``interfaces`` again, then picks one of two paths
+        based on what changed since the previous ``apply_config``:
 
-        * **full rebuild** — interfaces changed, or this is the
-          first SIGHUP (no ``_prev_config`` to diff against).
+        * **full rebuild** — interfaces changed, the IPv4 subnets
+          they resolve to changed, or no configuration has been
+          applied yet (no ``_prev_config`` to diff against).
           Broadcasts release for every registered name, tears down
           transports, rebuilds.
         * **live update** — name set, workgroup, or server_string
           changed.  Releases only the names that actually went
           away, registers newly-added names, updates browse
-          announcer payloads in place; transports stay bound."""
+          announcer payloads in place; transports stay bound.
+
+        Resolving on every reload is what serves an interface that
+        was skipped at startup because it had no IPv4 address yet;
+        nmbd likewise re-reads its interfaces on reload
+        (``reload_interfaces`` in ``source3/nmbd/nmbd.c``).  If the
+        new ``interfaces`` value cannot be resolved, the current
+        state is kept."""
         prev = self._prev_config
         cur = self._config
+
+        loop = asyncio.get_running_loop()
+        try:
+            subnets = await loop.run_in_executor(
+                None, resolve_subnets, list(cur.server.interfaces),
+            )
+        except ValueError as e:
+            logger.error("Reload: cannot resolve interfaces: %s", e)
+            return
 
         if (
             prev is None
             or prev.server.interfaces != cur.server.interfaces
+            or set(subnets) != set(self._resolved_subnets)
         ):
-            await self._full_rebuild_reload()
+            await self._full_rebuild_reload(subnets)
             return
 
         if prev.server == cur.server:
@@ -194,12 +223,13 @@ class NBNSServer(ConfigDaemon):
 
         await self._live_update_reload()
 
-    async def _full_rebuild_reload(self) -> None:
-        """Tear down transports and registrations, rebuild from scratch.
+    async def _full_rebuild_reload(self, subnets: list[NbnsSubnet]) -> None:
+        """Tear down transports and registrations, rebuild on *subnets*.
 
         The only path that closes and re-opens per-interface NBNS
-        transports.  Fires on ``interfaces`` changes and on first
-        SIGHUP."""
+        transports.  Fires when ``interfaces`` or the subnets it
+        resolves to change, and when no configuration has been
+        applied yet."""
         logger.info("Reload: full rebuild")
 
         for state in self._subnets:
@@ -219,20 +249,13 @@ class NBNSServer(ConfigDaemon):
         self._workgroup = self._config.server.workgroup.upper()
 
         loop = asyncio.get_running_loop()
-        try:
-            subnets = await loop.run_in_executor(
-                None, resolve_subnets, list(self._config.server.interfaces),
-            )
-        except ValueError as e:
-            logger.error("Reload: cannot resolve interfaces: %s", e)
-            return
-
+        self._resolved_subnets = subnets
         for subnet in subnets:
             await self._setup_subnet(subnet, loop)
 
         # Refresh the global receiver's subnet list so source-IP
         # dispatch matches the new config.  We don't restart the
-        # underlying sockets — they stay bound to 0.0.0.0:137/138
+        # underlying socket — it stays bound to 0.0.0.0:137
         # regardless of interface changes.
         if self._global_recv is not None:
             self._global_recv.update_subnets(subnets)
@@ -380,10 +403,11 @@ class NBNSServer(ConfigDaemon):
 
         # MS-BRWS §3.2.5.2: periodic HostAnnouncement on port 138.
         state.browse_announcer = BrowseAnnouncer(
-            send_fn=transport.send_dgram_broadcast,
+            send_fn=_dgram_broadcast_sender(transport, subnet),
             hostname=self._netbios_name,
             workgroup=self._workgroup,
             server_string=self._config.server.server_string,
+            source_ip=subnet.my_ip,
         )
         state.browse_announcer.start()
 
@@ -429,7 +453,9 @@ class NBNSServer(ConfigDaemon):
         """Dispatch an inbound NBNS message to the matching subnet handler.
 
         Multiple subnets may share one interface; pick the one whose
-        network contains the source address.
+        network contains the source address.  A broadcast arrives here
+        once per socket that received it; only the first copy is
+        dispatched (see ``PacketDedup``).
         """
         try:
             src_ip = IPv4Address(source[0])
@@ -440,10 +466,15 @@ class NBNSServer(ConfigDaemon):
         if state is None:
             return
 
+        if self._dedup.is_duplicate(
+            (source, msg.trn_id, msg.opcode, msg.is_response),
+        ):
+            return
+
         if msg.is_response:
             if msg.rcode != 0 and state.registrar:
                 for rr in msg.answers:
-                    state.registrar.on_conflict(rr.name)
+                    state.registrar.on_conflict(rr.name, msg.trn_id)
         else:
             if msg.opcode in (
                 Opcode.REGISTRATION,
@@ -482,6 +513,16 @@ def _broadcast_sender(transport: NBNSTransport, subnet: NbnsSubnet):
 
     def send(message: NBNSMessage) -> None:
         transport.send_unicast(message, dst)
+
+    return send
+
+
+def _dgram_broadcast_sender(transport: NBNSTransport, subnet: NbnsSubnet):
+    """Build a send-datagram callable targeting this subnet's bcast addr."""
+    dst = (str(subnet.broadcast), DGRAM_PORT)
+
+    def send(data: bytes) -> None:
+        transport.send_dgram(data, dst)
 
     return send
 

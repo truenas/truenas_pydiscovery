@@ -234,15 +234,29 @@ interfaces = eth0
 use-ipv4 = no
 use-ipv6 = yes
 domain-name = alt
-cache-entries-max = 2048
-enable-reflector = yes
 """))
         assert cfg.mdns is not None
         assert cfg.mdns.server.use_ipv4 is False
         assert cfg.mdns.server.use_ipv6 is True
         assert cfg.mdns.server.domain_name == "alt"
-        assert cfg.mdns.server.cache_entries_max == 2048
-        assert cfg.mdns.reflector.enable_reflector is True
+
+    def test_removed_mdns_options_are_ignored(self, tmp_path):
+        """A config file written for the removed options still loads."""
+        cfg = load_unified_config(_write(tmp_path, """
+[discovery]
+interfaces = eth0
+
+[mdns]
+domain-name = alt
+cache-entries-max = 2048
+enable-reflector = yes
+ratelimit-interval-usec = 500000
+ratelimit-burst = 500
+"""))
+        assert cfg.mdns is not None
+        assert cfg.mdns.server.domain_name == "alt"
+        assert not hasattr(cfg.mdns.server, "cache_entries_max")
+        assert not hasattr(cfg.mdns, "reflector")
 
     def test_netbiosns_fields(self, tmp_path):
         cfg = load_unified_config(_write(tmp_path, """

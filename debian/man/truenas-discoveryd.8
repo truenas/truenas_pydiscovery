@@ -1,13 +1,13 @@
 .TH TRUENAS\-DISCOVERYD 8 "2026-04-17" "truenas-pydiscovery" "System Administration"
 .SH NAME
-truenas\-pydiscoveryd \- TrueNAS unified network discovery daemon
+truenas\-discoveryd \- TrueNAS unified network discovery daemon
 .SH SYNOPSIS
-.B truenas\-pydiscoveryd
+.B truenas\-discoveryd
 .RB [ \-c
 .IR CONFIG ]
 .RB [ \-v ]
 .SH DESCRIPTION
-.B truenas\-pydiscoveryd
+.B truenas\-discoveryd
 is a single process that hosts three network discovery protocols
 in one Python event loop:
 .TP
@@ -29,7 +29,7 @@ flag in the configuration file.
 .TP
 .BI \-c " CONFIG" "\fR,\fP \-\-config " CONFIG
 Path to configuration file.
-Default: \fI/etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf\fP.
+Default: \fI/etc/truenas\-discovery/truenas\-discoveryd.conf\fP.
 .TP
 .BR \-v ", " \-\-verbose
 Increase log verbosity.
@@ -41,6 +41,21 @@ Without this flag, logging goes to syslog.
 Reload configuration across every enabled protocol.
 Each protocol re\-resolves interfaces, reloads local state, and
 re\-announces.
+.IP
+Reloads never overlap.
+A SIGHUP that arrives while the protocols are starting, or while a
+reload is running, is held; one reload runs once that has finished,
+however many signals were held.
+.IP
+Under systemd the unit is \fBType=notify\-reload\fP.
+The daemon reports readiness (\fBREADY=1\fP) as soon as its signal
+handlers are installed, before the protocols probe and register their
+names, so the start timeout does not cover that work.
+Startup ends with one reload pass, which applies configuration written
+before readiness was reported: systemd does not signal a reload
+requested before then.
+Each reload is reported with \fBRELOADING=1\fP and \fBREADY=1\fP, so
+\fBsystemctl reload\fP returns once the reload has finished.
 .IP
 The mDNS host name is an exception: it is established by probing at
 startup and is not re\-read on reload.  Once running, it changes only
@@ -60,30 +75,33 @@ probing afresh.
 .TP
 .B SIGUSR1
 Write runtime status for every enabled protocol to its per\-protocol
-status.json under \fI/run/truenas\-pydiscovery\fP.
+status.json under \fI/run/truenas\-discovery\fP.
 .TP
 .BR SIGTERM ", " SIGINT
 Graceful shutdown: each protocol sends its goodbye / release / bye
 frames and closes sockets.
+A shutdown requested during startup abandons the rest of startup, one
+requested during a reload abandons the reload, and a held SIGHUP is
+dropped.
 .SH FILES
 .TP
-.I /etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf
+.I /etc/truenas\-discovery/truenas\-discoveryd.conf
 Unified daemon configuration (INI format).
 .TP
-.I /etc/truenas\-pydiscovery/services.d/*.conf
+.I /etc/truenas\-discovery/services.d/*.conf
 mDNS service definition files (one per service).
 .TP
-.I /run/truenas\-pydiscovery/mdns/status.json
+.I /run/truenas\-discovery/mdns/status.json
 mDNS runtime status (SIGUSR1).
 .TP
-.I /run/truenas\-pydiscovery/netbiosns/status.json
+.I /run/truenas\-discovery/netbiosns/status.json
 NetBIOS NS runtime status.
 .TP
-.I /run/truenas\-pydiscovery/wsd/status.json
+.I /run/truenas\-discovery/wsd/status.json
 WS\-Discovery runtime status.
 .SH SEE ALSO
-.BR truenas\-pydiscoveryd.conf (5),
-.BR truenas\-mdnsd\-service.conf (5),
+.BR truenas\-discoveryd.conf (5),
+.BR truenas\-discoveryd\-service.conf (5),
 .BR mdns\-browse (1),
 .BR mdns\-lookup (1),
 .BR mdns\-resolve (1),

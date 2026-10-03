@@ -1,8 +1,9 @@
-"""WSD responder jitter (WS-Discovery §8.3) + unicast retransmission.
+"""WSD responder delay + unicast retransmission.
 
-Before responding to a Probe or Resolve, the responder must insert a
-random delay in [0, APP_MAX_DELAY] to avoid multicast UDP storms.
-Subsequent retransmissions follow the SOAP-over-UDP §3.4 pattern.
+Before a ProbeMatch the responder inserts a random delay in
+[0, APP_MAX_DELAY] (WS-Discovery 1.1 §5.3.1) to avoid synchronized
+bursts from many responders; a ResolveMatch is sent without one
+(§6.3.1).  Retransmissions follow the SOAP-over-UDP §3.4 pattern.
 """
 from __future__ import annotations
 
@@ -216,6 +217,41 @@ class TestResolveResponse:
 
         _run(drive(), timeout=5.0)
         assert len(cap.payloads) == UNICAST_UDP_REPEAT
+
+    def test_resolve_match_is_sent_without_delay(self):
+        """WS-Discovery 1.1 §6.3.1: the ResolveMatch "MUST be unicast
+        ... without waiting for a timer to elapse", unlike the
+        ProbeMatch (§5.3.1).  Every first copy goes out at once; the
+        0-500 ms ProbeMatch delay would miss this bound over five
+        Resolves."""
+        cap = _Capture()
+        endpoint_uuid = str(uuid.uuid4())
+        responder = WSDResponder(
+            cap, endpoint_uuid, "http://x", MessageDedup(),
+            addrs_v4=_ADDRS_V4, addrs_v6=[],
+        )
+        first_gaps: list[float] = []
+
+        async def drive() -> None:
+            loop = asyncio.get_running_loop()
+            responder._loop = loop
+            for _ in range(5):
+                env = _resolve_envelope(urn_uuid(endpoint_uuid))
+                t0 = time.monotonic()
+                responder.handle_message(env, ("10.0.0.9", 3702))
+                while not cap.stamps:
+                    await asyncio.sleep(0.001)
+                first_gaps.append(cap.stamps[0] - t0)
+                # Let the retransmission finish before the next round.
+                await asyncio.sleep(UDP_UPPER_DELAY + 0.1)
+                cap.stamps.clear()
+                cap.payloads.clear()
+                cap.dests.clear()
+
+        _run(drive(), timeout=10.0)
+        assert max(first_gaps) < 0.05, (
+            f"ResolveMatch first-copy delays {first_gaps}"
+        )
 
     def test_non_matching_endpoint_is_ignored(self):
         cap = _Capture()

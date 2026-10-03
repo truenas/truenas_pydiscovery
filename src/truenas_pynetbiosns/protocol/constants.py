@@ -172,8 +172,18 @@ DNS_MAX_LABEL_LENGTH = 63
 # ---------------------------------------------------------------------------
 
 # Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT)
+# nmbd instead resends a broadcast request 3 times after the first, one
+# time(NULL) second apart (``make_response_record`` in
+# source3/nmbd/nmbd_responserecordsdb.c).
 REGISTRATION_RETRY_COUNT = 3
 REGISTRATION_RETRY_INTERVAL = 0.250   # 250ms between retries
+
+# A datagram seen again within this window is taken for the second
+# socket's copy of one delivery.  Retransmitted requests reuse their
+# NAME_TRN_ID; RFC 1002 spaces them BCAST_REQ_RETRY_TIMEOUT (250 ms)
+# apart, outside the window, but nmbd's first resend can fall inside
+# it (see ``PacketDedup``).
+DUPLICATE_PACKET_WINDOW = 0.100
 
 # Name refresh (RFC 1002 s6)
 REFRESH_INTERVAL = 900                # 15 minutes (Samba default)
@@ -252,6 +262,45 @@ class BrowseOpcode(IntEnum):
     DOMAIN_ANNOUNCEMENT = 0x0C
     MASTER_ANNOUNCEMENT = 0x0D
     LOCAL_MASTER_ANNOUNCEMENT = 0x0F
+
+
+# ---------------------------------------------------------------------------
+# NetBIOS datagram service (RFC 1002 s4.4) and mailslot writes (MS-MAIL)
+# ---------------------------------------------------------------------------
+
+
+class DatagramType(IntEnum):
+    """MSG_TYPE of a NetBIOS datagram (RFC 1002 s4.4.1)."""
+    DIRECT_UNIQUE = 0x10
+    DIRECT_GROUP = 0x11
+    BROADCAST = 0x12
+    ERROR = 0x13
+    QUERY_REQUEST = 0x14
+    POSITIVE_QUERY_RESPONSE = 0x15
+    NEGATIVE_QUERY_RESPONSE = 0x16
+
+
+class DatagramFlag(IntFlag):
+    """FLAGS of a NetBIOS datagram (RFC 1002 s4.4.1).
+
+    The source end-node type (SNT) sits above these bits and is 0 for a
+    B node, so an unfragmented datagram from a B node carries FIRST only.
+    """
+    MORE = 0x01
+    FIRST = 0x02
+
+
+# The SMB command a mailslot write travels in (MS-MAIL 2.2.1).
+SMB_COM_TRANSACTION = 0x25
+
+# Mailslot write setup words (MS-MAIL 2.2.1).  Class 2 is the unreliable
+# class, the only one that may be broadcast.  Priority 1 is what Samba
+# nmbd sends (``send_mailslot``); Windows ignores it on receipt.
+MAILSLOT_OPCODE_WRITE = 0x0001
+MAILSLOT_PRIORITY = 1
+MAILSLOT_CLASS_UNRELIABLE = 0x0002
+
+MAILSLOT_BROWSE = "\\MAILSLOT\\BROWSE"
 
 
 # ---------------------------------------------------------------------------

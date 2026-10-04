@@ -14,6 +14,8 @@ VM_IP="192.168.122.10"
 VM_MAC="52:54:00:83:79:10"
 
 WORK_DIR="/tmp/qemu-work"
+# The VM's serial console: firmware, GRUB, kernel and cloud-init output.
+CONSOLE_LOG="$WORK_DIR/console.log"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
@@ -75,7 +77,10 @@ fi
 sudo virsh net-update default add ip-dhcp-host \
   "<host mac='$VM_MAC' ip='$VM_IP'/>" --live --config || true
 
+# UEFI, as pam_truenas and truenas_pyos boot this image.
 echo "Starting VM..."
+# Exists before libvirt hands it to QEMU, which runs as libvirt-qemu.
+touch "$CONSOLE_LOG"
 sudo virt-install \
   --name "$VM_NAME" \
   --os-variant debian12 \
@@ -87,8 +92,19 @@ sudo virt-install \
   --network bridge=virbr0,model=virtio,mac="$VM_MAC" \
   --cloud-init user-data=/tmp/user-data \
   --disk path="$WORK_DIR/vm-disk.qcow2",format=qcow2,bus=virtio \
+  --boot uefi=on \
+  --serial file,path="$CONSOLE_LOG" \
   --import \
   --noautoconsole >/dev/null
+
+# Written now, so that the logs are collected even if the VM never
+# comes up.
+cat <<EOF > /tmp/vm-info.sh
+export VM_IP="$VM_IP"
+export VM_NAME="$VM_NAME"
+export WORK_DIR="$WORK_DIR"
+export CONSOLE_LOG="$CONSOLE_LOG"
+EOF
 
 echo "Waiting for VM to be ready..."
 for i in {1..60}; do
@@ -102,13 +118,11 @@ done
 
 if ! ssh "debian@$VM_IP" "uname -a"; then
   echo "ERROR: VM is not accessible"
+  sudo virsh domstate --reason "$VM_NAME" || true
+  sudo virsh net-dhcp-leases default || true
+  echo "---- VM console, last 80 lines ----"
+  sudo tail -n 80 "$CONSOLE_LOG" || true
   exit 1
 fi
-
-cat <<EOF > /tmp/vm-info.sh
-export VM_IP="$VM_IP"
-export VM_NAME="$VM_NAME"
-export WORK_DIR="$WORK_DIR"
-EOF
 
 echo "VM started successfully at $VM_IP"

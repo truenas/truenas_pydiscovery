@@ -312,9 +312,11 @@ CI runs them in a Debian Trixie VM.
 - **build-test**: in a `debian:trixie` container, flake8, mypy, the
   Debian package build, and the unit and integration tests against the
   installed package.
-- **qemu-test**: boots a Debian Trixie cloud image under QEMU/KVM on
-  the runner, builds and installs the package in it, and runs the
-  whole suite as root, functional tests included.
+- **qemu-test**: boots a Debian Trixie cloud image under QEMU/KVM
+  (UEFI) on the runner, builds and installs the package in it, and
+  runs the whole suite as root, functional tests included.  The VM's
+  serial console and journal go into the job's `test-logs-debian-trixie`
+  artifact.
 - **publish**: on a push to a branch listed in `.github/trains.json`
   (`master` as train `master`, `stable/27` as train `27`), once both
   test jobs have passed, replaces the rolling `<train>-nightly` GitHub

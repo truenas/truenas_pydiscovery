@@ -25,6 +25,40 @@ bring down the others.  Each can be individually disabled via its
 section's
 .B enabled = false
 flag in the configuration file.
+.SH INTERFACE CHANGES
+The daemon follows the kernel's interface and address notifications
+(netlink), so no reload is needed when an interface or address comes or
+goes.
+Once the notifications have been quiet for one second, and at most five
+seconds after the first of them, the interfaces and their addresses are
+read again.
+If nothing changed, as when the kernel repeats an IPv6 address on each
+router advertisement, nothing happens.
+Otherwise each protocol updates the interfaces whose addresses changed
+and leaves the others alone:
+.TP
+\(bu
+NetBIOS NS rebuilds the subnets on such an interface and registers its
+names on them; the names of a subnet whose address is gone are not
+released.
+.TP
+\(bu
+mDNS sends goodbyes for the address records it no longer publishes
+(those of addresses that went away, and those of link\-local IPv6
+addresses once the interface has one that is not link\-local),
+publishes the
+addresses the interface has now, and probes and announces its services
+there again.
+.TP
+\(bu
+WS\-Discovery serves the interface's new addresses and sends a Hello.
+.PP
+An interface listed in the configuration that does not exist yet, or
+has no address yet, is served once it has one.
+When a link comes back up, mDNS probes and announces on it again
+(RFC\ 6762 \(sc8.3).
+Updates never run alongside a reload: one requested during a reload, or
+during startup, runs once that has finished, and the other way round.
 .SH OPTIONS
 .TP
 .BI \-c " CONFIG" "\fR,\fP \-\-config " CONFIG
@@ -56,6 +90,9 @@ before readiness was reported: systemd does not signal a reload
 requested before then.
 Each reload is reported with \fBRELOADING=1\fP and \fBREADY=1\fP, so
 \fBsystemctl reload\fP returns once the reload has finished.
+systemd applies the unit's start timeout (\fBTimeoutStartSec=300\fP) to
+each reload as well, including the wait for startup to finish when the
+reload was requested during startup.
 .IP
 The mDNS host name is an exception: it is established by probing at
 startup and is not re\-read on reload.  Once running, it changes only

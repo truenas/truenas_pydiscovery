@@ -19,8 +19,9 @@ that is down or has no IPv4 address, an address or network not
 configured here — is skipped with a warning, as Samba's
 ``interpret_interface`` skips it (``source3/lib/interface.c``), and the
 remaining tokens still resolve.  ``NBNSServer`` resolves the tokens
-again on every reload, so such an interface is served from the first
-reload after it has an address.  Malformed tokens (empty, bad CIDR)
+again whenever the system's interfaces or addresses change
+(``_reconcile_interfaces``) and on every reload, so such an interface
+is served once it has an address.  Malformed tokens (empty, bad CIDR)
 raise ``ValueError``.
 
 Broadcast-address limitation: broadcast is derived from the

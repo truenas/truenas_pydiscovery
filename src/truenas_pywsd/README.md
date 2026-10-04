@@ -36,4 +36,3 @@ The following open-source projects were used as implementation references:
 ## Limitations
 
 - **Server mode only.** The daemon responds to Probes and serves metadata but does not actively discover other devices.
-- **No Netlink interface monitoring.** Interface changes require SIGHUP reload.

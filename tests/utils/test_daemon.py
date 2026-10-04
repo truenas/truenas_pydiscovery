@@ -83,17 +83,22 @@ class TestBaseDaemon:
 
 
 class GatedDaemon(BaseDaemon):
-    """Daemon whose ``_start`` and ``_reload`` stay in progress until
-    their gates open, recording each lifecycle step in ``events``."""
+    """Daemon whose ``_start``, ``_reload`` and ``_reconcile_interfaces``
+    stay in progress until their gates open, recording each lifecycle
+    step in ``events``."""
 
     def __init__(self):
         super().__init__(logging.getLogger("test.daemon.gated"))
         self.start_gate = asyncio.Event()
         self.reload_gate = asyncio.Event()
         self.reload_gate.set()
+        self.reconcile_gate = asyncio.Event()
+        self.reconcile_gate.set()
         self.fail_next_reload = False
+        self.fail_next_reconcile = False
         self.events: list[str] = []
         self.reloads = 0
+        self.reconciles = 0
 
     async def _start(self, loop):
         self.events.append("start-begin")
@@ -119,6 +124,19 @@ class GatedDaemon(BaseDaemon):
             self.fail_next_reload = False
             raise RuntimeError("reload boom")
         self.events.append("reload-end")
+
+    async def _reconcile_interfaces(self):
+        self.reconciles += 1
+        self.events.append("reconcile-begin")
+        try:
+            await self.reconcile_gate.wait()
+        except asyncio.CancelledError:
+            self.events.append("reconcile-cancelled")
+            raise
+        if self.fail_next_reconcile:
+            self.fail_next_reconcile = False
+            raise RuntimeError("reconcile boom")
+        self.events.append("reconcile-end")
 
 
 async def _until(condition) -> None:
@@ -211,8 +229,8 @@ class TestStartupGatingAndNotify:
             await asyncio.sleep(0.05)
             assert d.reloads == 0
             d.start_gate.set()
-            await _until(lambda: d._reload_task is not None)
-            await d._reload_task
+            await _until(lambda: d._work_task is not None)
+            await d._work_task
             d._signal_shutdown()
             await runner
 
@@ -232,7 +250,7 @@ class TestStartupGatingAndNotify:
             runner = asyncio.create_task(d.run())
             await _until(lambda: d._started)
             d._signal_reload()
-            await d._reload_task
+            await d._work_task
             d._signal_shutdown()
             await runner
 
@@ -353,7 +371,7 @@ class TestReloadSerialisation:
             d._signal_reload()
             d.reload_gate.set()
             await _until(
-                lambda: d.reloads == 2 and not d._reload_in_progress(),
+                lambda: d.reloads == 2 and not d._work_in_progress(),
             )
             d._signal_shutdown()
             await runner
@@ -386,7 +404,7 @@ class TestReloadSerialisation:
             d._signal_reload()
             d.reload_gate.set()
             await _until(
-                lambda: d.reloads == 2 and not d._reload_in_progress(),
+                lambda: d.reloads == 2 and not d._work_in_progress(),
             )
             d._signal_shutdown()
             await runner
@@ -401,3 +419,183 @@ class TestReloadSerialisation:
         assert _kinds(_queued(notify_socket)) == [
             "READY", "RELOADING", "READY", "RELOADING", "READY",
         ]
+
+
+class TestInterfaceReconcile:
+    """``request_reconcile`` runs ``_reconcile_interfaces`` through the
+    same one-at-a-time queue as SIGHUP reloads, without telling
+    systemd, which never asked for it."""
+
+    def test_requests_during_startup_run_one_reconcile_after_it(
+        self, notify_socket,
+    ):
+        d = GatedDaemon()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: "start-begin" in d.events)
+            d.request_reconcile()
+            d.request_reconcile()
+            await asyncio.sleep(0.05)
+            assert d.reconciles == 0
+            d.start_gate.set()
+            await _until(lambda: d.reconciles == 1 and not d._work_in_progress())
+            d._signal_shutdown()
+            await runner
+
+        _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reconcile-begin", "reconcile-end", "stop",
+        ]
+        assert _kinds(_queued(notify_socket)) == ["READY"]
+
+    def test_reconcile_waits_for_a_running_reload(self, notify_socket):
+        d = GatedDaemon()
+        d.start_gate.set()
+        d.reload_gate.clear()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: d._started)
+            d._signal_reload()
+            await _until(lambda: "reload-begin" in d.events)
+            d.request_reconcile()
+            await asyncio.sleep(0.05)
+            assert d.reconciles == 0
+            d.reload_gate.set()
+            await _until(lambda: d.reconciles == 1 and not d._work_in_progress())
+            d._signal_shutdown()
+            await runner
+
+        _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reload-begin", "reload-end",
+            "reconcile-begin", "reconcile-end", "stop",
+        ]
+        assert _kinds(_queued(notify_socket)) == ["READY", "RELOADING", "READY"]
+
+    def test_reload_requested_during_a_reconcile_runs_after_it(
+        self, notify_socket, caplog,
+    ):
+        """The held reload starts once the reconcile has finished, so
+        its RELOADING=1 postdates the SIGHUP, as systemd requires."""
+        d = GatedDaemon()
+        d.start_gate.set()
+        d.reconcile_gate.clear()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: d._started)
+            d.request_reconcile()
+            await _until(lambda: "reconcile-begin" in d.events)
+            d._signal_reload()
+            await asyncio.sleep(0.05)
+            assert d.reloads == 0
+            assert _kinds(_queued(notify_socket)) == ["READY"]
+            d.reconcile_gate.set()
+            await _until(lambda: d.reloads == 1 and not d._work_in_progress())
+            d._signal_shutdown()
+            await runner
+
+        with caplog.at_level(logging.INFO, logger="test.daemon.gated"):
+            _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reconcile-begin", "reconcile-end",
+            "reload-begin", "reload-end", "stop",
+        ]
+        assert any(
+            "SIGHUP during an interface update" in r.message
+            for r in caplog.records
+        )
+        assert _kinds(_queued(notify_socket)) == ["RELOADING", "READY"]
+
+    def test_held_reload_goes_before_a_held_reconcile(self, notify_socket):
+        d = GatedDaemon()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: "start-begin" in d.events)
+            d.request_reconcile()
+            d._signal_reload()
+            d.start_gate.set()
+            await _until(
+                lambda: d.reconciles == 1 and d.reloads == 1
+                and not d._work_in_progress(),
+            )
+            d._signal_shutdown()
+            await runner
+
+        _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reload-begin", "reload-end",
+            "reconcile-begin", "reconcile-end", "stop",
+        ]
+
+    def test_failed_reconcile_is_logged_and_the_next_runs(
+        self, notify_socket, caplog,
+    ):
+        d = GatedDaemon()
+        d.start_gate.set()
+        d.reconcile_gate.clear()
+        d.fail_next_reconcile = True
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: d._started)
+            d.request_reconcile()
+            await _until(lambda: "reconcile-begin" in d.events)
+            d.request_reconcile()
+            d.reconcile_gate.set()
+            await _until(lambda: d.reconciles == 2 and not d._work_in_progress())
+            d._signal_shutdown()
+            await runner
+
+        with caplog.at_level(logging.ERROR, logger="test.daemon.gated"):
+            _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reconcile-begin", "reconcile-begin", "reconcile-end", "stop",
+        ]
+        assert any(
+            "Interface update failed" in r.message for r in caplog.records
+        )
+
+    def test_reconcile_in_progress_is_cancelled_before_stop(
+        self, notify_socket,
+    ):
+        d = GatedDaemon()
+        d.start_gate.set()
+        d.reconcile_gate.clear()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: d._started)
+            d.request_reconcile()
+            await _until(lambda: "reconcile-begin" in d.events)
+            d._signal_shutdown()
+            await runner
+
+        _run(scenario)
+        assert d.events == [
+            "start-begin", "start-end",
+            "reconcile-begin", "reconcile-cancelled", "stop",
+        ]
+        assert _queued(notify_socket) == [b"READY=1"]
+
+    def test_request_while_stopping_is_ignored(self, notify_socket):
+        d = GatedDaemon()
+        d.start_gate.set()
+
+        async def scenario() -> None:
+            runner = asyncio.create_task(d.run())
+            await _until(lambda: d._started)
+            d._signal_shutdown()
+            d.request_reconcile()
+            await runner
+
+        _run(scenario)
+        assert d.reconciles == 0

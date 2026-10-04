@@ -181,11 +181,15 @@ _MY_IP = IPv4Address("192.0.2.10")
 _DEFENDER = ("192.0.2.20", 137)
 
 
-def _server_with_registrar(tmp_path) -> tuple[NBNSServer, Registrar, list]:
+def _server_with_registrar(
+    tmp_path, **server_kwargs,
+) -> tuple[NBNSServer, Registrar, list]:
     """An NBNSServer with one subnet whose registrar's requests are
     collected in the returned list."""
+    server_kwargs.setdefault("netbios_name", "NAS01")
+    server_kwargs.setdefault("workgroup", "WG")
     server = NBNSServer(DaemonConfig(
-        server=ServerConfig(netbios_name="NAS01", workgroup="WG"),
+        server=ServerConfig(**server_kwargs),
         rundir=tmp_path,
     ))
     subnet = NbnsSubnet(
@@ -239,6 +243,77 @@ class TestNegativeResponseDispatch:
         )
         assert claimed is True
         assert requests == REGISTRATION_RETRY_COUNT
+
+
+class TestConcurrentClaims:
+    """``NBNSServer._register_names`` claims every name at once, each
+    with its own request, as Samba nmbd's
+    ``register_my_workgroup_one_subnet`` queues one registration per
+    name without waiting for the previous one."""
+
+    @staticmethod
+    def _claim_all(server: NBNSServer) -> float:
+        state = server._subnets[0]
+        started = time.monotonic()
+        _run(server._register_names(state))
+        return time.monotonic() - started
+
+    def test_every_name_is_claimed_at_once(self, tmp_path):
+        server, _, sent = _server_with_registrar(
+            tmp_path, netbios_aliases=["NAS02"],
+        )
+        elapsed = self._claim_all(server)
+        one_claim = REGISTRATION_RETRY_COUNT * REGISTRATION_RETRY_INTERVAL
+        # Seven names one after another would take seven claim times.
+        assert elapsed < 2 * one_claim
+        table = server._subnets[0].name_table
+        for name in ("NAS01", "NAS02"):
+            for name_type in (
+                NameType.WORKSTATION, NameType.MESSENGER, NameType.SERVER,
+            ):
+                entry = table.lookup(NetBIOSName(name, name_type))
+                assert entry is not None and entry.registered
+        workgroup = table.lookup(NetBIOSName("WG", NameType.WORKSTATION))
+        assert workgroup is not None and workgroup.registered
+        assert len({msg.trn_id for msg in sent}) == 7
+        assert len(sent) == 7 * REGISTRATION_RETRY_COUNT
+
+    def test_a_name_listed_twice_is_claimed_once(self, tmp_path):
+        server, _, sent = _server_with_registrar(
+            tmp_path, netbios_aliases=["NAS01", "nas02", "NAS02"],
+        )
+        self._claim_all(server)
+        claimed = {
+            (msg.questions[0].name.name.upper(), msg.questions[0].name.name_type)
+            for msg in sent
+        }
+        assert len(claimed) == 7
+        assert len(sent) == 7 * REGISTRATION_RETRY_COUNT
+
+    def test_a_defended_name_does_not_stop_the_others(self, tmp_path):
+        server, _, sent = _server_with_registrar(tmp_path)
+        state = server._subnets[0]
+        contested = NetBIOSName("NAS01", NameType.SERVER)
+
+        async def drive() -> None:
+            task = asyncio.create_task(server._register_names(state))
+            await asyncio.sleep(0.050)
+            (request,) = [
+                msg for msg in sent if msg.questions[0].name == contested
+            ]
+            server._handle_message(
+                NBNSMessage.build_negative_response(
+                    request.trn_id, "NAS01", NameType.SERVER, Rcode.ACT_ERR,
+                ),
+                _DEFENDER, "eth0",
+            )
+            await task
+
+        _run(drive())
+        assert state.name_table.lookup(contested) is None
+        for name_type in (NameType.WORKSTATION, NameType.MESSENGER):
+            entry = state.name_table.lookup(NetBIOSName("NAS01", name_type))
+            assert entry is not None and entry.registered
 
 
 class TestRegistrationWireFormat:

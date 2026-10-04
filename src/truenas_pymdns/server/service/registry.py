@@ -23,8 +23,12 @@ class ServiceRegistry:
         self._groups: list[EntryGroup] = []
 
     def add_group(self, group: EntryGroup) -> None:
-        """Register an entry group so its records become authoritative."""
-        self._groups.append(group)
+        """Register an entry group so its records become authoritative.
+
+        Registering a group that is already registered changes nothing:
+        its records are answered once."""
+        if group not in self._groups:
+            self._groups.append(group)
 
     def remove_group(self, group: EntryGroup) -> None:
         """Unregister an entry group; no-op if not present."""

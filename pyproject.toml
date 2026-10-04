@@ -31,6 +31,7 @@ where = ["src"]
 markers = [
     "integration: integration tests requiring real network and root",
     "broadcast: tests requiring broadcast-capable interface",
+    "functional: tests driving the installed daemon under systemd (TRUENAS_PYDISCOVERY_FUNCTIONAL=1)",
 ]
 
 [tool.mypy]

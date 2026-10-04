@@ -12,7 +12,13 @@ logged so one protocol's problem can't take down the others.  The
 composite itself is a ``BaseDaemon``, so it inherits the same signal
 handling (SIGTERM/SIGINT/SIGHUP/SIGUSR1) — child daemons are driven
 purely through their ``_start`` / ``_stop`` / ``_reload`` /
-``_write_status`` hooks.
+``_reconcile_interfaces`` / ``_on_link_up`` / ``_write_status`` hooks.
+
+The composite also owns the process's one ``InterfaceMonitor``: a link
+coming up goes to every child's ``_on_link_up`` at once, and a settled
+burst of link and address changes becomes a ``request_reconcile``,
+served like a SIGHUP by one ``_reconcile_interfaces`` pass across the
+children.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .daemon import BaseDaemon
+from .interface_monitor import InterfaceMonitor
 
 ConfigReloader = Callable[[], Any]
 ConfigDispatcher = Callable[[Sequence[tuple[str, BaseDaemon]], Any], None]
@@ -88,6 +95,9 @@ class CompositeDaemon(BaseDaemon):
         self._reload_reader_failures = 0
         self._reload_dispatch_failures = 0
         self._last_reload_error: str = ""
+        self._monitor = InterfaceMonitor(
+            self._on_link_up, self.request_reconcile,
+        )
 
     async def _start(
         self, loop: asyncio.AbstractEventLoop,
@@ -109,6 +119,15 @@ class CompositeDaemon(BaseDaemon):
             "Starting composite daemon with children: %s",
             ", ".join(name for name, _ in self._children),
         )
+        # Monitor before the children read their interfaces: a change
+        # made while they start is held and reconciled once they have.
+        try:
+            self._monitor.start(loop)
+        except OSError as e:
+            self._logger.warning(
+                "Interface monitor unavailable: %s; interface and "
+                "address changes are picked up on reload only", e,
+            )
         results = await asyncio.gather(
             *(child._start(loop) for _, child in self._children),
             return_exceptions=True,
@@ -125,6 +144,7 @@ class CompositeDaemon(BaseDaemon):
 
     async def _stop(self) -> None:
         """Stop every child concurrently.  Errors are logged, not re-raised."""
+        self._monitor.stop()
         self._remove_pidfile()
         results = await asyncio.gather(
             *(child._stop() for _, child in self._children),
@@ -169,6 +189,36 @@ class CompositeDaemon(BaseDaemon):
         if self._config_reloader is not None:
             await self._refresh_child_configs()
         await self._reload_children()
+
+    async def _reconcile_interfaces(self) -> None:
+        """Have every child bring its interfaces in line with the
+        system's.  A child's failure is logged, not re-raised."""
+        self._logger.info("Interfaces or addresses changed; updating")
+        results = await asyncio.gather(
+            *(child._reconcile_interfaces() for _, child in self._children),
+            return_exceptions=True,
+        )
+        for (name, _), res in zip(self._children, results):
+            if isinstance(res, BaseException):
+                self._logger.error(
+                    "Child %s failed to update its interfaces: %s",
+                    name, res,
+                )
+
+    async def _on_link_up(self, ifindex: int) -> None:
+        """Tell every child that interface *ifindex* came up."""
+        results = await asyncio.gather(
+            *(child._on_link_up(ifindex) for _, child in self._children),
+            return_exceptions=True,
+        )
+        for (name, _), res in zip(self._children, results):
+            if isinstance(res, BaseException) and not isinstance(
+                res, asyncio.CancelledError,
+            ):
+                self._logger.error(
+                    "Child %s failed to handle interface %d coming up: %s",
+                    name, ifindex, res,
+                )
 
     async def _reload_children(self) -> None:
         results = await asyncio.gather(

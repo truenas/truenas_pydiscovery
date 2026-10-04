@@ -44,6 +44,8 @@ On startup, for each configured name (primary + aliases), the daemon registers:
 
 Registration uses B-node broadcast: one registration request, sent up to 3 times on port 137, each followed by a 250ms wait (RFC 1002 §5.1.1.1). The first negative response carrying the request's NAME_TRN_ID ends the claim; if none has arrived by the end of the last wait, the name is considered registered.
 
+Every name on every subnet is claimed at the same time, each with its own request, as Samba nmbd queues one registration per name (`register_my_workgroup_one_subnet`). Registering all names therefore takes one claim's 750ms however many names and subnets there are. A name listed more than once is claimed once.
+
 ## Subpackages
 
 - [core/](core/README.md) — name table, registration, defense, refresh, release

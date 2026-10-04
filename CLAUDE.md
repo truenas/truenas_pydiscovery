@@ -18,12 +18,18 @@ mypy src/
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests/ -v
+
+# Functional tests: root, systemd, the package installed.  They
+# reconfigure the host's network and its truenas-discoveryd service,
+# so run them on a disposable host; CI runs them in the QEMU VM job.
+sudo TRUENAS_PYDISCOVERY_FUNCTIONAL=1 python3 -m pytest tests/functional -v
 ```
 
 ## Testing Policy
 
 - All bugfixes and significant functional changes must include test coverage
 - Tests live in `tests/` mirroring the source layout (`tests/mdns/`, `tests/netbiosns/`, `tests/wsd/`, `tests/utils/`)
+- Behaviour that only shows under systemd or on a real network (unit lifecycle, interface and address changes, frames as a peer receives them) gets a functional test in `tests/functional/`, which drives the installed unit and queries it with the client tools from network namespaces
 - Run with coverage: `PYTHONPATH=src python3 -m pytest tests/ --cov=truenas_pymdns --cov=truenas_pynetbiosns --cov=truenas_pywsd --cov-report=term-missing -v`
 - **No mocks.** Never use `unittest.mock.MagicMock`, `Mock`, or `patch`. Build real dependencies — a real `ServiceRegistry` with a real `EntryGroup`, a real `RecordCache`, a real `QueryScheduler` with a lambda send-fn, a real `asyncio.new_event_loop()` — or delete the test.
 - **Hand-rolled fakes count as mocks.** A `class _FakeSock: def sendto(self, ...)` that records arguments is morally the same as `MagicMock`: it duck-types a real object without exercising real behaviour. Same rule — build the real dep (e.g. a loopback socket pair) or delete the test.

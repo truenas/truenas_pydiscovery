@@ -107,11 +107,16 @@ MAX_PROBING_CONFLICT_RETRIES = 1
 ANNOUNCE_INTERVAL_INITIAL = 1.0
 ANNOUNCE_COUNT = 3
 
-# Link-flap detection / throttling.  Mirrors Apple mDNSResponder's
-# ``mDNS_RegisterInterface`` (mDNSCore/mDNS.c:14262-14273) which uses
-# a longer probe delay and reduced announcement count for a flapping
-# interface: *"In the case of a flapping interface, we pause for
-# five seconds, and reduce the announcement count to one packet."*
+# Link-flap throttling: an interface that comes up again within
+# LINK_FLAP_WINDOW of its last coming up waits LINK_FLAP_PROBE_DELAY
+# before probing and announces once.  This is our policy.  It is taken
+# from mDNSResponder's ``SlowActivation`` (``mDNS_RegisterInterface``,
+# up to mDNSResponder-2600.140.3, chosen by its macOS platform layer):
+# *"In the case of a flapping interface, we pause for five seconds,
+# and reduce the announcement count to one packet."*  The pinned
+# mDNSResponder-2881.0.25 keeps that comment but has no SlowActivation,
+# and probes every interface it registers after
+# LINK_NORMAL_PROBE_DELAY (``NormalActivation``).
 LINK_FLAP_WINDOW = 10.0             # re-up within this = flap
 LINK_FLAP_PROBE_DELAY = 5.0         # extended defer on flap
 LINK_NORMAL_PROBE_DELAY = 0.5       # normal (mDNSPlatformOneSecond/2)

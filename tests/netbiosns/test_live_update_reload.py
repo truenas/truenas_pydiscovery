@@ -17,7 +17,7 @@ import asyncio
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from truenas_pynetbiosns.protocol.constants import NameType, Opcode
+from truenas_pynetbiosns.protocol.constants import NameType, Opcode, ServerType
 from truenas_pynetbiosns.protocol.message import NBNSMessage
 from truenas_pynetbiosns.protocol.name import NetBIOSName
 from truenas_pynetbiosns.server.browse.announcer import (
@@ -312,7 +312,6 @@ class TestBrowseAnnouncerSetters:
         )
         # Manually run one send, change, send again — we don't want
         # to race the real _loop() timer.
-        from truenas_pynetbiosns.protocol.constants import ServerType
         st = ServerType.WORKSTATION | ServerType.SERVER
         ann._send_announcement(st, interval_s=60)
         ann.set_server_string("new")
@@ -338,7 +337,6 @@ class TestBrowseAnnouncerSetters:
             send_fn=sent.append, hostname="OLD", workgroup="WG",
             source_ip=_LOCAL_IP,
         )
-        from truenas_pynetbiosns.protocol.constants import ServerType
         st = ServerType.WORKSTATION | ServerType.SERVER
         ann.set_hostname("NEW")
         ann._send_announcement(st, interval_s=60)
@@ -348,3 +346,35 @@ class TestBrowseAnnouncerSetters:
             server_type=st, announce_interval_ms=60000,
         )
         assert decode_mailslot(sent[0])["data"] == expected
+
+    def test_set_hostname_changes_future_announcement_source(self):
+        """The datagram comes from the new name as well
+        (``<hostname>[0x00]``), not only the payload's ServerName."""
+        sent: list[bytes] = []
+        ann = BrowseAnnouncer(
+            send_fn=sent.append, hostname="OLD", workgroup="WG",
+            source_ip=_LOCAL_IP,
+        )
+        st = ServerType.WORKSTATION | ServerType.SERVER
+        ann.set_hostname("NEW")
+        ann._send_announcement(st, interval_s=60)
+        assert decode_mailslot(sent[0])["source"] == NetBIOSName(
+            "NEW", NameType.WORKSTATION,
+        )
+
+    def test_set_workgroup_readdresses_future_announcements(self):
+        """The workgroup appears only in the datagram's destination
+        name: after a rename the next announcement goes to the new
+        workgroup's local master browser, ``<workgroup>[0x1D]``
+        (MS-BRWS §3.2.5.2)."""
+        sent: list[bytes] = []
+        ann = BrowseAnnouncer(
+            send_fn=sent.append, hostname="HOST", workgroup="OLDWG",
+            source_ip=_LOCAL_IP,
+        )
+        st = ServerType.WORKSTATION | ServerType.SERVER
+        ann.set_workgroup("NEWWG")
+        ann._send_announcement(st, interval_s=60)
+        assert decode_mailslot(sent[0])["dest"] == NetBIOSName(
+            "NEWWG", NameType.LOCAL_MASTER,
+        )

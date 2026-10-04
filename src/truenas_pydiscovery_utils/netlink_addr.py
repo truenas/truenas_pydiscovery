@@ -88,8 +88,8 @@ _RECV_BUF_SIZE = 65536
 #                 care of assigning it when calling bind(2)").  A
 #                 specific portid would collide with any other
 #                 netlink socket in this process bound to the same
-#                 value (notably ``link_monitor.LinkMonitor``, which
-#                 subscribes to ``RTMGRP_LINK``).
+#                 value (notably ``interface_monitor.InterfaceMonitor``,
+#                 which subscribes to link and address changes).
 # Groups 0 means no multicast subscriptions — we only want the
 # one-shot dump, not live ``RTM_NEWADDR`` / ``RTM_DELADDR`` events.
 _ANY_ADDR = (0, 0)
@@ -136,23 +136,40 @@ def enumerate_all_addresses() -> dict[int, InterfaceAddresses]:
     dict.
     """
     try:
-        sock = socket.socket(
-            socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE,
+        buf = netlink_dump(
+            RTM_GETADDR, _IFADDRMSG.pack(socket.AF_UNSPEC, 0, 0, 0, 0),
         )
     except OSError as e:
-        logger.error("netlink socket open failed: %s", e)
+        logger.error("netlink dump failed: %s", e)
         return {}
-    try:
+    return parse_dump_all(buf)
+
+
+def netlink_dump(message_type: int, body: bytes) -> bytes:
+    """Send one ``NLM_F_DUMP`` request and return every reply.
+
+    *message_type* is the ``RTM_GET*`` request and *body* its fixed
+    header (``ifaddrmsg`` for ``RTM_GETADDR``, ``ifinfomsg`` for
+    ``RTM_GETLINK``).  Uses a short-lived ``AF_NETLINK /
+    NETLINK_ROUTE`` socket and returns the replies concatenated, up
+    to and including ``NLMSG_DONE`` or ``NLMSG_ERROR``.  Raises
+    ``OSError`` if the socket cannot be used or the kernel does not
+    finish within ``_NETLINK_DUMP_TIMEOUT_S``.
+    """
+    with socket.socket(
+        socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE,
+    ) as sock:
         sock.settimeout(_NETLINK_DUMP_TIMEOUT_S)
         sock.bind(_ANY_ADDR)
-        _send_getaddr(sock)
-        buf = _drain_until_done(sock)
-    except OSError as e:
-        logger.error("netlink dump failed: %s", e)
-        sock.close()
-        return {}
-    sock.close()
-    return parse_dump_all(buf)
+        hdr = _NLMSGHDR.pack(
+            _NLMSGHDR.size + len(body),
+            message_type,
+            NLM_F_REQUEST | NLM_F_DUMP,
+            _REQUEST_SEQ,
+            0,               # nlmsg_pid: 0 ⇒ kernel fills in on reply
+        )
+        sock.sendto(hdr + body, _ANY_ADDR)
+        return _drain_until_done(sock)
 
 
 def enumerate_addresses(ifindex: int) -> InterfaceAddresses:
@@ -164,19 +181,6 @@ def enumerate_addresses(ifindex: int) -> InterfaceAddresses:
     addresses (or the dump failed).
     """
     return enumerate_all_addresses().get(ifindex, InterfaceAddresses())
-
-
-def _send_getaddr(sock: socket.socket) -> None:
-    """Send one ``RTM_GETADDR`` dump request (both families)."""
-    body = _IFADDRMSG.pack(socket.AF_UNSPEC, 0, 0, 0, 0)
-    hdr = _NLMSGHDR.pack(
-        _NLMSGHDR.size + len(body),
-        RTM_GETADDR,
-        NLM_F_REQUEST | NLM_F_DUMP,
-        _REQUEST_SEQ,
-        0,               # nlmsg_pid: 0 ⇒ kernel fills in on reply
-    )
-    sock.sendto(hdr + body, _ANY_ADDR)
 
 
 def _drain_until_done(sock: socket.socket) -> bytes:

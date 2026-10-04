@@ -78,7 +78,8 @@ class ServerConfig:
     """Core server settings.
 
     ``interfaces`` accepts a mix of three token forms, resolved against
-    the live network state at daemon startup and again on every reload:
+    the live network state at daemon startup, on every reload, and
+    whenever the system's interfaces or addresses change:
 
     - Interface name (``eth0``) — every IPv4 address on the interface
     - Bare IPv4 (``10.0.0.5``) — one specific local address

@@ -3,14 +3,16 @@
 Provides ``BaseDaemon``, an async-native base class that manages:
 
 * Graceful shutdown on SIGTERM / SIGINT, including during startup
-* Config reload on SIGHUP, deferred while startup or another reload
-  is running
+* Config reload on SIGHUP, and interface reconciliation when the
+  system's interfaces or addresses change (``request_reconcile``),
+  run one at a time and deferred while startup is running
 * Status dump on SIGUSR1
 * Structured start → run → stop lifecycle
 * systemd ``Type=notify-reload`` readiness and reload notifications
 
 Subclasses implement ``_start``, ``_stop``, and optionally
-``apply_config``, ``_reload``, and ``_write_status``.
+``apply_config``, ``_reload``, ``_reconcile_interfaces``,
+``_on_link_up`` and ``_write_status``.
 """
 from __future__ import annotations
 
@@ -43,6 +45,12 @@ class BaseDaemon:
         async def _reload(self) -> None:          # optional (SIGHUP)
             ...
 
+        async def _reconcile_interfaces(self) -> None:   # optional
+            # Interfaces or addresses changed (``request_reconcile``).
+
+        async def _on_link_up(self, ifindex: int) -> None:  # optional
+            # Interface *ifindex* came up.
+
         def _write_status(self) -> None:           # optional (SIGUSR1)
             ...
     """
@@ -50,14 +58,18 @@ class BaseDaemon:
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
         self._shutdown_event = asyncio.Event()
-        # False until ``_start`` returns.  ``_reload`` works on the
-        # state ``_start`` builds, and two reloads must not interleave,
-        # so a SIGHUP that arrives during startup or during a reload
-        # only sets ``_reload_pending``; one reload runs once the
-        # current step has finished.
+        # False until ``_start`` returns.  ``_reload`` and
+        # ``_reconcile_interfaces`` work on the state ``_start`` builds
+        # and must not interleave with each other, so a request that
+        # arrives during startup or while one of them runs only sets
+        # its pending flag; ``_run_pending`` serves it once the current
+        # step has finished.
         self._started = False
         self._reload_pending = False
-        self._reload_task: asyncio.Task | None = None
+        self._reconcile_pending = False
+        self._work_task: asyncio.Task | None = None
+        # What ``_work_task`` is running, for the log.
+        self._work_label = ""
 
     async def run(self) -> None:
         """Start, run until shutdown signal, then stop.
@@ -65,10 +77,10 @@ class BaseDaemon:
         Readiness is reported to systemd (``READY=1``, a no-op outside
         systemd) as soon as the signal handlers are installed, before
         ``_start`` runs, so systemd's start timeout does not cover the
-        protocols' probing and registration.  From then on a SIGHUP is
-        held until startup completes, and a stop request abandons the
-        rest of startup.  A reload still running at shutdown is
-        cancelled before ``_stop``.
+        protocols' probing and registration.  From then on a SIGHUP or
+        a reconcile request is held until startup completes, and a stop
+        request abandons the rest of startup.  A reload or reconcile
+        still running at shutdown is cancelled before ``_stop``.
         """
         loop = asyncio.get_running_loop()
         self._setup_signals(loop)
@@ -76,15 +88,10 @@ class BaseDaemon:
         try:
             if await self._start_unless_stopped(loop):
                 self._started = True
-                if (
-                    self._reload_pending
-                    and not self._shutdown_event.is_set()
-                ):
-                    self._reload_pending = False
-                    self._schedule_reload(loop)
+                self._serve_pending(loop)
                 await self._shutdown_event.wait()
         finally:
-            await self._cancel_reload()
+            await self._cancel_work()
             await self._stop()
 
     async def _start_unless_stopped(
@@ -142,6 +149,18 @@ class BaseDaemon:
         """Called on SIGHUP.  Override to support live reload."""
         self._logger.info("SIGHUP received but reload not implemented")
 
+    async def _reconcile_interfaces(self) -> None:
+        """Called after the system's interfaces or addresses changed.
+
+        Override to bring the live state in line with them.  Never
+        runs alongside ``_start``, ``_reload`` or another reconcile."""
+        return None
+
+    async def _on_link_up(self, ifindex: int) -> None:
+        """Called when interface *ifindex* comes up.  Override to
+        announce on it again."""
+        return None
+
     def _write_status(self) -> None:
         """Called on SIGUSR1.  Override to dump runtime status."""
         self._logger.info("SIGUSR1 received but status dump not implemented")
@@ -162,46 +181,72 @@ class BaseDaemon:
         if self._shutdown_event.is_set():
             self._logger.info("Received SIGHUP while stopping; ignored")
             return
-        if not self._started or self._reload_in_progress():
+        self._reload_pending = True
+        if not self._started or self._work_in_progress():
             self._logger.info(
                 "Received SIGHUP during %s; reloading once it completes",
-                "startup" if not self._started else "a reload",
+                self._work_label if self._started else "startup",
             )
-            self._reload_pending = True
             return
         self._logger.info("Received SIGHUP, scheduling reload")
-        self._schedule_reload(asyncio.get_running_loop())
+        self._serve_pending(asyncio.get_running_loop())
 
-    def _reload_in_progress(self) -> bool:
-        return self._reload_task is not None and not self._reload_task.done()
+    def request_reconcile(self) -> None:
+        """Have ``_reconcile_interfaces`` run: interfaces or addresses
+        changed.  Held, like a SIGHUP, while startup, a reload or
+        another reconcile is running."""
+        if self._shutdown_event.is_set():
+            return
+        self._reconcile_pending = True
+        if self._started and not self._work_in_progress():
+            self._serve_pending(asyncio.get_running_loop())
 
-    def _schedule_reload(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._reload_task = loop.create_task(self._run_reloads())
+    def _work_in_progress(self) -> bool:
+        return self._work_task is not None and not self._work_task.done()
 
-    async def _run_reloads(self) -> None:
-        """Run ``_reload`` inside the ``Type=notify-reload`` protocol,
-        and once more whenever a SIGHUP was held while it ran.
+    def _serve_pending(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self._shutdown_event.is_set():
+            return
+        if self._reload_pending or self._reconcile_pending:
+            self._work_task = loop.create_task(self._run_pending())
 
-        Every pass sends ``RELOADING=1`` (with ``MONOTONIC_USEC``)
-        before ``_reload`` and ``READY=1`` after it, so systemd sees a
-        reload finish only once one that began after its signal has
-        completed.  A failed pass is logged and does not stop the next.
+    async def _run_pending(self) -> None:
+        """Run the held reloads and reconciles, one at a time, until
+        none is left.
+
+        A reload runs inside the ``Type=notify-reload`` protocol:
+        ``RELOADING=1`` (with ``MONOTONIC_USEC``) before ``_reload``
+        and ``READY=1`` after it, so systemd sees a reload finish only
+        once one that began after its signal has completed.  A
+        reconcile is not reported: systemd did not ask for it.  A held
+        reload goes first.  A failed pass is logged and does not stop
+        the next.
         """
-        while True:
-            notify_reloading()
-            try:
-                await self._reload()
-            except Exception:
-                self._logger.exception("Reload failed")
-            finally:
-                notify_ready()
-            if not self._reload_pending or self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
+            if self._reload_pending:
+                self._reload_pending = False
+                self._work_label = "a reload"
+                notify_reloading()
+                try:
+                    await self._reload()
+                except Exception:
+                    self._logger.exception("Reload failed")
+                finally:
+                    notify_ready()
+            elif self._reconcile_pending:
+                self._reconcile_pending = False
+                self._work_label = "an interface update"
+                try:
+                    await self._reconcile_interfaces()
+                except Exception:
+                    self._logger.exception("Interface update failed")
+            else:
                 return
-            self._reload_pending = False
 
-    async def _cancel_reload(self) -> None:
-        """Cancel a reload still running at shutdown and wait for it."""
-        task = self._reload_task
+    async def _cancel_work(self) -> None:
+        """Cancel a reload or reconcile still running at shutdown and
+        wait for it."""
+        task = self._work_task
         if task is None or task.done():
             return
         task.cancel()

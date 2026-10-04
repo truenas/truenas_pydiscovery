@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from ipaddress import IPv6Address
 
 from truenas_pydiscovery_utils.daemon import ConfigDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
@@ -26,6 +27,8 @@ from truenas_pymdns.protocol.constants import (
 )
 from truenas_pymdns.protocol.message import MDNSMessage
 from truenas_pymdns.protocol.records import (
+    AAAARecordData,
+    ARecordData,
     MDNSRecord,
     MDNSRecordKey,
     PTRRecordData,
@@ -33,7 +36,6 @@ from truenas_pymdns.protocol.records import (
     TXTRecordData,
 )
 from .net.interface import InterfaceInfo, resolve_interface
-from .net.link_monitor import LinkMonitor
 from .net.transport import MDNSTransport
 from .query.responder import Responder
 from .service.file_loader import (
@@ -148,8 +150,7 @@ class MDNSServer(ConfigDaemon):
         # lazily per running loop by ``_get_rebuild_lock``.
         self._rebuild_lock: asyncio.Lock | None = None
         self._rebuild_lock_loop: asyncio.AbstractEventLoop | None = None
-        self._link_monitor: LinkMonitor | None = None
-        # Flap-detection state per ifindex (mDNS.c:14262-14273):
+        # Flap-detection state per ifindex (see LINK_FLAP_WINDOW):
         # time of most recent re-probe-triggering link-up and the
         # currently-pending _on_link_up task (used to coalesce
         # multiple flaps into a single re-probe).
@@ -181,19 +182,6 @@ class MDNSServer(ConfigDaemon):
 
         await self._probe_and_announce_all()
 
-        # RFC 6762 §8.3 / §13 + BCT II.17 "HOT-PLUGGING": listen for
-        # link state changes and re-probe all affected groups when a
-        # link comes back up.  Mirrors mDNSPosix's
-        # RTMGRP_LINK netlink subscription (mDNSPosix/mDNSPosix.c:1620).
-        try:
-            self._link_monitor = LinkMonitor(self._on_link_up)
-            self._link_monitor.start(loop)
-        except OSError as e:
-            # Non-Linux or unprivileged sandbox — log and continue
-            # without hot-plug support.
-            logger.warning("LinkMonitor unavailable: %s", e)
-            self._link_monitor = None
-
         logger.info(
             "mDNS daemon started with %d services on %d interfaces",
             len(self._entry_groups), len(self._interfaces),
@@ -201,10 +189,6 @@ class MDNSServer(ConfigDaemon):
 
     async def _stop(self) -> None:
         logger.info("Stopping mDNS daemon")
-
-        if self._link_monitor is not None:
-            self._link_monitor.stop()
-            self._link_monitor = None
 
         for task in self._conflict_tasks:
             task.cancel()
@@ -381,30 +365,39 @@ class MDNSServer(ConfigDaemon):
         transport is actually active.
 
         IPv6 link-local addresses are published only when the interface
-        has no other IPv6 address, as avahi publishes them
-        (``avahi_interface_address_is_relevant`` in avahi-core/iface.c:702).
-        RFC 6762 §6.2 goes further — for an interface with both a
-        link-local and a routable address, "both should be included" —
-        and mDNSResponder's POSIX port advertises every interface
-        address (``SetupInterfaceList`` in mDNSPosix/mDNSPosix.c); we
-        follow avahi.
+        has no IPv6 address beyond link-local ones, as avahi publishes
+        them (``avahi_interface_address_is_relevant`` in
+        avahi-core/iface.c:702).  ``enumerate_addresses`` leaves out
+        deprecated addresses, so, as in avahi, a deprecated routable
+        address does not hold back a link-local one.  This departs from
+        RFC 6762 §6.2, under which a response "MUST include all addresses
+        that are valid on the interface" (for an interface with both a
+        link-local and a routable IPv6 address, "both should be
+        included"), and from mDNSResponder's POSIX port, which
+        advertises every interface address (``SetupInterfaceList`` in
+        mDNSPosix/mDNSPosix.c); we follow avahi.
         """
         self._host_groups.clear()
         for ifstate in self._interfaces.values():
-            group = EntryGroup()
-            if ifstate.transport.has_ipv4:
-                for v4 in ifstate.iface.addrs_v4:
-                    group.add_address(self._fqdn, str(v4))
-            if ifstate.transport.has_ipv6:
-                v6_addrs = ifstate.iface.addrs_v6
-                routable_v6 = [a for a in v6_addrs if not a.is_link_local]
-                for v6 in routable_v6 or v6_addrs:
-                    group.add_address(self._fqdn, str(v6))
-            if not group.records:
-                continue
-            group.interfaces = [ifstate.iface.index]
-            self._entry_groups.append(group)
-            self._host_groups.append(group)
+            self._add_host_group(ifstate)
+
+    def _add_host_group(self, ifstate: PerInterfaceState) -> EntryGroup | None:
+        """Register *ifstate*'s host address group (see
+        ``_register_host_addresses``); None if it has no address to
+        publish."""
+        group = EntryGroup()
+        if ifstate.transport.has_ipv4:
+            for v4 in ifstate.iface.addrs_v4:
+                group.add_address(self._fqdn, str(v4))
+        if ifstate.transport.has_ipv6:
+            for v6 in _published_v6(ifstate.iface.addrs_v6):
+                group.add_address(self._fqdn, str(v6))
+        if not group.records:
+            return None
+        group.interfaces = [ifstate.iface.index]
+        self._entry_groups.append(group)
+        self._host_groups.append(group)
+        return group
 
     def _goodbye_all_interfaces(self) -> None:
         """Multicast TTL=0 goodbyes for every registered record, per
@@ -441,8 +434,7 @@ class MDNSServer(ConfigDaemon):
         *announce_count* lets callers scale back announcement traffic —
         link-flap handling passes ``LINK_FLAP_ANNOUNCE_COUNT`` (1) to
         avoid flooding the network when an interface bounces rapidly
-        (matches Apple mDNSResponder's flap handling at
-        ``mDNSCore/mDNS.c:14262-14273``).
+        (see ``LINK_FLAP_WINDOW``).
         """
         if group not in self._entry_groups:
             # A concurrent re-registration discarded this group — the
@@ -907,14 +899,13 @@ class MDNSServer(ConfigDaemon):
         """BCT II.17 / RFC 6762 §8.3 hot-plug re-probe with flap
         throttling.
 
-        Mirrors Apple mDNSResponder's ``mDNS_RegisterInterface``
-        (``mDNSCore/mDNS.c:14174``).  The 0.5s normal probe delay
-        guards against stale echoed packets from the cable
-        transition; a longer 5s delay plus single-announcement mode
-        kicks in if this interface has re-registered within
-        ``LINK_FLAP_WINDOW`` (mDNSResponder: *"In the case of a flapping
-        interface, we pause for five seconds, and reduce the
-        announcement count to one packet."*, ``mDNS.c:14262``).
+        Called by the composite's ``InterfaceMonitor`` when *ifindex*
+        comes up.  As in mDNSResponder's ``mDNS_RegisterInterface``
+        (``mDNSCore/mDNS.c:14174``), probing waits 0.5s to let stale
+        echoes of our own packets from before the transition die out.
+        A link that comes up again within ``LINK_FLAP_WINDOW`` waits
+        5s instead and announces once; that throttling is our policy
+        (see ``LINK_FLAP_WINDOW``).
 
         If a second link-up arrives for the same ifindex during the
         defer window, the still-sleeping prior task is cancelled so
@@ -959,28 +950,162 @@ class MDNSServer(ConfigDaemon):
             if self._pending_link_ups.get(ifindex) is current:
                 self._pending_link_ups.pop(ifindex, None)
 
-        if self._interfaces.get(ifindex) is None:
-            return
-        affected: list[EntryGroup] = []
-        for group in self._entry_groups:
-            if group.state != EntryGroupState.ESTABLISHED:
-                continue
-            if not group.publishes_on(ifindex):
-                continue
-            affected.append(group)
-        if not affected:
-            return
-        logger.info(
-            "Link up on ifindex %d — re-probing %d group(s)",
-            ifindex, len(affected),
-        )
+        # Under ``_rebuild_lock``: an interface reconcile triggered by
+        # the same link transition re-probes these groups too, and two
+        # probes of one group must not overlap.
+        async with self._get_rebuild_lock():
+            if self._interfaces.get(ifindex) is None:
+                return
+            affected = self._withdraw_groups_on({ifindex})
+            if not affected:
+                return
+            logger.info(
+                "Link up on ifindex %d — re-probing %d group(s)",
+                ifindex, len(affected),
+            )
+            for group in affected:
+                await self._probe_and_announce(
+                    group, announce_count=announce_count,
+                )
+
+    def _withdraw_groups_on(
+        self, interface_indexes: set[int],
+    ) -> list[EntryGroup]:
+        """Take every established group published on any of
+        *interface_indexes* out of the registry, ready to probe and
+        announce again, and return them."""
+        affected = [
+            group for group in self._entry_groups
+            if group.state == EntryGroupState.ESTABLISHED
+            and any(group.publishes_on(i) for i in interface_indexes)
+        ]
         for group in affected:
             self._registry.remove_group(group)
             group.set_state(EntryGroupState.UNCOMMITTED)
-        for group in affected:
-            await self._probe_and_announce(
-                group, announce_count=announce_count,
+        return affected
+
+    # -- Interface changes ----------------------------------------------------
+
+    async def _reconcile_interfaces(self) -> None:
+        """Bring the interfaces in line with what the system has now.
+
+        Called once interface and address changes have settled (the
+        composite's ``InterfaceMonitor``).  Each configured interface
+        is resolved again and compared with what it had when its
+        transport was set up:
+
+        * one that appeared is set up, and its host addresses are
+          registered, probed and announced;
+        * one whose addresses changed gets a new transport, since the
+          IPv4 socket is bound to the address it started with
+          (``IP_MULTICAST_IF`` and the group membership).  The host
+          records it no longer publishes are withdrawn with a goodbye,
+          sent while the old transport can still send: those of
+          addresses it lost, and that of a link-local IPv6 address
+          once a routable one has arrived.  A new host group for the
+          addresses it publishes now is probed and announced;
+        * one that disappeared is torn down, its records with it.
+
+        Every established group published on an interface that
+        appeared or changed is then probed and announced again, as when
+        a link comes up (``_on_link_up``).  mDNSResponder likewise
+        registers the interfaces afresh on any change
+        (``mDNSPlatformPosixRefreshInterfaceList``), and avahi publishes
+        and withdraws the records of each address as it comes and goes
+        (``avahi_interface_address_update_rrs``).  Interfaces whose
+        addresses did not change are left alone.  Runs under
+        ``_rebuild_lock``.
+        """
+        if not self._config.server.interfaces:
+            return
+        loop = asyncio.get_running_loop()
+        current: dict[int, InterfaceInfo] = {}
+        for name in self._config.server.interfaces:
+            iface = await loop.run_in_executor(
+                None, resolve_interface, name,
             )
+            if iface is not None:
+                current[iface.index] = iface
+        async with self._get_rebuild_lock():
+            await self._apply_interfaces(current, loop)
+
+    async def _apply_interfaces(
+        self,
+        current: dict[int, InterfaceInfo],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """``_reconcile_interfaces`` for the interfaces *current*
+        (index to what it has now)."""
+        gone = [index for index in self._interfaces if index not in current]
+        changed = [
+            index for index, iface in current.items()
+            if index in self._interfaces
+            and not _same_addresses(iface, self._interfaces[index].iface)
+        ]
+        added = [index for index in current if index not in self._interfaces]
+        if not (gone or changed or added):
+            return
+        logger.info(
+            "Interfaces changed: %d appeared, %d changed, %d gone",
+            len(added), len(changed), len(gone),
+        )
+        for index in gone:
+            await self._drop_interface(index, None)
+        for index in changed:
+            await self._drop_interface(index, current[index])
+        touched: set[int] = set()
+        for index in changed + added:
+            await self._setup_transport(current[index], loop)
+            if index in self._interfaces:
+                touched.add(index)
+        if not touched:
+            return
+        restarted = self._withdraw_groups_on(touched)
+        host_groups = [
+            group for group in (
+                self._add_host_group(self._interfaces[index])
+                for index in sorted(touched)
+            )
+            if group is not None
+        ]
+        for group in host_groups + restarted:
+            await self._probe_and_announce(group)
+
+    async def _drop_interface(
+        self, index: int, now: InterfaceInfo | None,
+    ) -> None:
+        """Tear down interface *index*'s transport and host group.
+
+        *now* is what the interface has now, or None if it is gone.
+        While it is still there, the host records of addresses it will
+        no longer publish are withdrawn with a goodbye first
+        (RFC 6762 §10.1), as avahi's ``avahi_s_entry_group_reset`` says
+        goodbye to an address's records when the address stops being
+        relevant (``avahi_interface_address_update_rrs``)."""
+        ifstate = self._interfaces.pop(index)
+        for group in [g for g in self._host_groups if g.interfaces == [index]]:
+            self._cancel_group_announces(group)
+            if now is not None:
+                published = set(now.addrs_v4) | set(_published_v6(now.addrs_v6))
+                withdrawn = {
+                    record.data.address for record in group.records
+                    if isinstance(record.data, (ARecordData, AAAARecordData))
+                } - published
+                reverse_names = {a.reverse_pointer for a in withdrawn}
+                goodbyes = [
+                    record for record in group.records
+                    if (
+                        isinstance(record.data, (ARecordData, AAAARecordData))
+                        and record.data.address in withdrawn
+                    )
+                    or record.key.name in reverse_names
+                ]
+                if goodbyes:
+                    send_goodbye(ifstate.transport.send_message, goodbyes)
+            self._registry.remove_group(group)
+            self._host_groups.remove(group)
+            self._entry_groups.remove(group)
+        await ifstate.stop()
 
     # -- Reload ---------------------------------------------------------------
 
@@ -1308,6 +1433,21 @@ class MDNSServer(ConfigDaemon):
                 len(g.records) for g in self._entry_groups
             ),
         })
+
+
+def _published_v6(addresses: list[IPv6Address]) -> list[IPv6Address]:
+    """The IPv6 addresses of an interface that get AAAA records: link-
+    local ones only when it has no other (see
+    ``_register_host_addresses``)."""
+    routable = [a for a in addresses if not a.is_link_local]
+    return routable or addresses
+
+
+def _same_addresses(a: InterfaceInfo, b: InterfaceInfo) -> bool:
+    return (
+        set(a.addrs_v4) == set(b.addrs_v4)
+        and set(a.addrs_v6) == set(b.addrs_v6)
+    )
 
 
 def _decode_txt(data: TXTRecordData) -> dict[str, str]:

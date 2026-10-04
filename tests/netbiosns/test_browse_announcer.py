@@ -14,9 +14,15 @@ import time
 from ipaddress import IPv4Address
 
 from truenas_pynetbiosns.protocol.constants import (
+    ANNOUNCE_INTERVAL_INITIAL,
+    DGRAM_PORT,
     BrowseOpcode,
+    DatagramFlag,
+    DatagramType,
+    NameType,
     ServerType,
 )
+from truenas_pynetbiosns.protocol.name import NetBIOSName
 from truenas_pynetbiosns.server.browse.announcer import (
     BrowseAnnouncer,
     build_host_announcement,
@@ -148,9 +154,6 @@ class TestAnnouncerSchedule:
         d = _parse_host_announcement(decode_mailslot(sent[0])["data"])
         # First-burst periodicity equals ANNOUNCE_INTERVAL_INITIAL
         # (seconds) in milliseconds.
-        from truenas_pynetbiosns.protocol.constants import (
-            ANNOUNCE_INTERVAL_INITIAL,
-        )
         assert d["periodicity_ms"] == int(
             ANNOUNCE_INTERVAL_INITIAL * 1000,
         )
@@ -178,6 +181,35 @@ class TestAnnouncerSchedule:
             )
 
         _run(drive())
+
+
+class TestAnnouncerDatagramEnvelope:
+    """The datagram around the announcement, decoded as a receiver
+    reads it: a mailslot write to ``<workgroup>[0x1D]`` on
+    ``\\MAILSLOT\\BROWSE`` (MS-BRWS §3.2.5.2), sent from
+    ``<hostname>[0x00]`` as a DIRECT_GROUP datagram, as Samba nmbd's
+    ``send_host_announcement`` sends it."""
+
+    def test_announcement_is_addressed_to_the_local_master_browser(self):
+        sent: list[bytes] = []
+        a = BrowseAnnouncer(sent.append, "HOSTA", "WG", source_ip=_SOURCE_IP)
+
+        async def drive() -> None:
+            a.start()
+            await asyncio.sleep(0.050)
+            a.cancel()
+
+        _run(drive())
+        assert sent
+        d = decode_mailslot(sent[0])
+        assert d["msg_type"] == DatagramType.DIRECT_GROUP
+        assert d["flags"] == DatagramFlag.FIRST
+        assert d["source_ip"] == _SOURCE_IP
+        assert d["source_port"] == DGRAM_PORT
+        assert d["source"] == NetBIOSName("HOSTA", NameType.WORKSTATION)
+        assert d["dest"] == NetBIOSName("WG", NameType.LOCAL_MASTER)
+        assert d["mailslot"] == "\\MAILSLOT\\BROWSE"
+        assert _parse_host_announcement(d["data"])["hostname"] == "HOSTA"
 
 
 # Suppress the unused-time import warning — kept for readability of

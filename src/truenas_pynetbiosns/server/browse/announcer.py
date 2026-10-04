@@ -297,10 +297,12 @@ class BrowseAnnouncer:
             server_type=server_type,
             announce_interval_ms=interval_s * 1000,
         )
-        # From <hostname>[0x00] to <workgroup>[0x1D] on \MAILSLOT\BROWSE,
-        # as Samba nmbd's ``send_host_announcement`` sends it.  MS-BRWS
-        # §2.2.1 says a server SHOULD use \MAILSLOT\LANMAN; §2.1 has
-        # browsers accept either mailslot.
+        # From <hostname>[0x00] to <workgroup>[0x1D] on \MAILSLOT\BROWSE:
+        # the name and mailslot MS-BRWS §3.2.5.2 gives for the mailslot
+        # write, and what Samba nmbd's ``send_host_announcement`` sends.
+        # §2.2.1 instead says a server SHOULD use \MAILSLOT\LANMAN, which
+        # Windows does (product note <9>); §2.1 has a browser server
+        # accept either mailslot.
         self._send(build_mailslot_datagram(
             payload,
             mailslot=MAILSLOT_BROWSE,

@@ -11,7 +11,9 @@ Network layer: broadcast UDP sockets and subnet resolution.
   yields two ``NbnsSubnet`` instances sharing one underlying
   ``NBNSTransport``.  A token that matches no local IPv4 address
   is skipped with a warning, as Samba's ``interpret_interface``
-  skips it; the server resolves the tokens again on every reload.
+  skips it; the server resolves the tokens again whenever the
+  system's interfaces or addresses change and on every reload, and
+  rebuilds the subnets of the interfaces whose resolution changed.
   IPv4 only; IPv6 isn't defined for NetBIOS over TCP/IP
   (RFC 1001/1002).
 - `transport.py` — `NBNSTransport`: per-interface asyncio

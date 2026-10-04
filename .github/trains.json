@@ -1,0 +1,25 @@
+{
+  "docs": [
+    "Pushes to a listed branch publish its python3-truenas-pydiscovery",
+    "deb as the <train>-nightly release, once the container build and",
+    "the QEMU functional tests have passed.",
+    "",
+    "Each branch reads its own copy of this file.  To retire a train,",
+    "remove its entry on that branch before deleting the release and",
+    "tag, or the next push recreates them.",
+    "",
+    "workflows/scripts/resolve-train.py validates this file on every CI",
+    "run: required fields, allowed characters, no duplicate branch or",
+    "train."
+  ],
+  "trains": [
+    {
+      "train": "master",
+      "branch": "master"
+    },
+    {
+      "train": "27",
+      "branch": "stable/27"
+    }
+  ]
+}

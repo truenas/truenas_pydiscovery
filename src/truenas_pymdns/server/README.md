@@ -5,7 +5,7 @@ mDNS/DNS-SD server module — runs as a child of the unified
 
 ## Modules
 
-- `server.py` — top-level orchestrator. Manages per-interface state (transport, responder, prober, announcer), loads service files, handles probing/announcing and conflict resolution, re-probes on link up. Drives SIGTERM/SIGINT shutdown, SIGHUP reload, SIGUSR1 status dump via the `BaseDaemon` contract; signals are received by the parent composite. `status.json` is written atomically to rundir by `truenas_pydiscovery_utils.status.StatusWriter`.
+- `server.py` — top-level orchestrator. Manages per-interface state (transport, responder, prober, announcer), loads service files, handles probing/announcing and conflict resolution, re-probes on link up (`_on_link_up`), and follows interface and address changes (`_reconcile_interfaces`: per-interface transport rebuild, goodbyes for host records no longer published, re-probe and re-announce), both driven by the composite daemon's `InterfaceMonitor`. Drives SIGTERM/SIGINT shutdown, SIGHUP reload, SIGUSR1 status dump via the `BaseDaemon` contract; signals are received by the parent composite. `status.json` is written atomically to rundir by `truenas_pydiscovery_utils.status.StatusWriter`.
 - `config.py` — `DaemonConfig` dataclass + helpers. The unified loader in `truenas_pydiscovery.config` reads the `[mdns]` section into this dataclass.
 
 Wire protocol types (`MDNSMessage`, `MDNSRecord`, etc.) live in the shared [`truenas_pymdns.protocol`](../protocol/README.md) package.

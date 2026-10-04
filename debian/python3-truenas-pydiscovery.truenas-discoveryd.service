@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=notify-reload
+# systemd applies the start timeout to every reload as well; a reload
+# requested during startup also waits for startup to finish.
+TimeoutStartSec=300
 User=truenas-discovery
 Group=daemon
 ExecStart=/usr/bin/truenas-discoveryd -c /etc/truenas-discovery/truenas-discoveryd.conf

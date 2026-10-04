@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from ipaddress import IPv4Address
+from typing import Iterable
 
 from truenas_pydiscovery_utils.daemon import ConfigDaemon
 from truenas_pydiscovery_utils.status import StatusWriter
@@ -27,6 +28,7 @@ from truenas_pynetbiosns.protocol.constants import (
     Opcode,
 )
 from truenas_pynetbiosns.protocol.message import NBNSMessage
+from truenas_pynetbiosns.protocol.name import NetBIOSName
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +142,9 @@ class NBNSServer(ConfigDaemon):
         )
         await self._global_recv.start(loop)
 
-        for state in self._subnets:
-            await self._register_names(state)
+        await asyncio.gather(*(
+            self._register_names(state) for state in self._subnets
+        ))
 
         logger.info(
             "NetBIOS NS daemon started on %d subnets across %d interfaces",
@@ -191,12 +194,12 @@ class NBNSServer(ConfigDaemon):
           away, registers newly-added names, updates browse
           announcer payloads in place; transports stay bound.
 
-        Resolving on every reload is what serves an interface that
-        was skipped at startup because it had no IPv4 address yet;
-        nmbd likewise re-reads its interfaces on reload
-        (``reload_interfaces`` in ``source3/nmbd/nmbd.c``).  If the
-        new ``interfaces`` value cannot be resolved, the current
-        state is kept."""
+        Interface and address changes between reloads are followed by
+        ``_reconcile_interfaces``; resolving again here keeps a reload
+        consistent with the interfaces as they are when it runs, as
+        nmbd's SIGHUP handler runs ``reload_interfaces``
+        (``source3/nmbd/nmbd.c``).  If the new ``interfaces`` value
+        cannot be resolved, the current state is kept."""
         prev = self._prev_config
         cur = self._config
 
@@ -260,13 +263,77 @@ class NBNSServer(ConfigDaemon):
         if self._global_recv is not None:
             self._global_recv.update_subnets(subnets)
 
-        for state in self._subnets:
-            await self._register_names(state)
+        await asyncio.gather(*(
+            self._register_names(state) for state in self._subnets
+        ))
 
         logger.info(
             "Full rebuild complete: %d subnets across %d interfaces",
             len(self._subnets), len(self._transports),
         )
+
+    async def _reconcile_interfaces(self) -> None:
+        """Serve the subnets ``interfaces`` resolves to now.
+
+        Called once interface and address changes have settled (the
+        composite's ``InterfaceMonitor``).  Only interfaces whose
+        subnets changed are touched, and each of those is set up
+        afresh, since its transport is bound to one of its subnet
+        addresses: its subnets are rebuilt and claim their names again.
+        The names of a subnet whose address is gone are not released,
+        that address being gone.  This is the shape of nmbd's
+        ``reload_interfaces``, which makes a subnet for each new address
+        (``make_normal_subnet``, ``register_my_workgroup_one_subnet``)
+        and closes the subnet of each vanished one (``close_subnet``);
+        nmbd polls for them every ``NMBD_INTERFACES_RELOAD`` (120 s).
+        If ``interfaces`` cannot be resolved, the current state is
+        kept."""
+        if not self._config.server.interfaces:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            subnets = await loop.run_in_executor(
+                None, resolve_subnets, list(self._config.server.interfaces),
+            )
+        except ValueError as e:
+            logger.error("Interface update: cannot resolve interfaces: %s", e)
+            return
+        await self._apply_subnets(subnets, loop)
+
+    async def _apply_subnets(
+        self, subnets: list[NbnsSubnet], loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """``_reconcile_interfaces`` for the resolved *subnets*."""
+        changed = {
+            subnet.interface_name
+            for subnet in set(self._resolved_subnets).symmetric_difference(
+                subnets,
+            )
+        }
+        if not changed:
+            return
+        logger.info("Subnets changed on %s", ", ".join(sorted(changed)))
+        for state in [
+            state for state in self._subnets
+            if state.subnet.interface_name in changed
+        ]:
+            state.stop()
+            self._subnets.remove(state)
+        for name in sorted(changed):
+            transport = self._transports.pop(name, None)
+            if transport is not None:
+                await transport.stop()
+
+        self._resolved_subnets = subnets
+        kept = len(self._subnets)
+        for subnet in subnets:
+            if subnet.interface_name in changed:
+                await self._setup_subnet(subnet, loop)
+        if self._global_recv is not None:
+            self._global_recv.update_subnets(subnets)
+        await asyncio.gather(*(
+            self._register_names(state) for state in self._subnets[kept:]
+        ))
 
     async def _live_update_reload(self) -> None:
         """In-place reconciliation for non-interface config changes.
@@ -322,14 +389,10 @@ class NBNSServer(ConfigDaemon):
         self._workgroup = new_workgroup
 
         if to_register:
-            for state in self._subnets:
-                if state.registrar is None:
-                    continue
-                ip = state.subnet.my_ip
-                for name, name_type, is_group in to_register:
-                    await state.registrar.register(
-                        name, name_type, ip, group=is_group,
-                    )
+            await asyncio.gather(*(
+                _register_records(state, to_register)
+                for state in self._subnets
+            ))
 
         for state in self._subnets:
             if state.browse_announcer is None:
@@ -420,27 +483,10 @@ class NBNSServer(ConfigDaemon):
     # -- Name registration --------------------------------------------------
 
     async def _register_names(self, state: PerSubnetState) -> None:
-        """Register all configured names on one subnet."""
-        if state.registrar is None:
-            return
-        ip = state.subnet.my_ip
-
-        all_names = (
-            [self._netbios_name] + self._config.server.netbios_aliases
-        )
-        for hostname in all_names:
-            for name_type in (
-                NameType.WORKSTATION,
-                NameType.MESSENGER,
-                NameType.SERVER,
-            ):
-                await state.registrar.register(
-                    hostname, name_type, ip,
-                )
-
-        await state.registrar.register(
-            self._workgroup, NameType.WORKSTATION, ip, group=True,
-        )
+        """Register all configured names on one subnet at once."""
+        await _register_records(state, _expected_name_records(
+            self._config.server, self._netbios_name, self._workgroup,
+        ))
 
     # -- Message handling ---------------------------------------------------
 
@@ -527,13 +573,39 @@ def _dgram_broadcast_sender(transport: NBNSTransport, subnet: NbnsSubnet):
     return send
 
 
+async def _register_records(
+    state: PerSubnetState, records: Iterable[NameRecord],
+) -> None:
+    """Claim every name in *records* on *state*'s subnet concurrently.
+
+    Each claim is its own registration request with its own NAME_TRN_ID
+    and its own retransmissions, as Samba nmbd queues one response
+    record per name (``register_name``, called for each name by
+    ``register_my_workgroup_one_subnet``) and retransmits them all from
+    one loop.  A NetBIOS name listed more than once (names compare
+    case-insensitively) is claimed once; for one name listed both as a
+    unique and as a group name, the unique claim is made."""
+    registrar = state.registrar
+    if registrar is None:
+        return
+    claims: dict[NetBIOSName, NameRecord] = {}
+    for record in sorted(records):
+        name, name_type, _is_group = record
+        claims.setdefault(NetBIOSName(name, name_type), record)
+    ip = state.subnet.my_ip
+    await asyncio.gather(*(
+        registrar.register(name, name_type, ip, group=is_group)
+        for name, name_type, is_group in claims.values()
+    ))
+
+
 def _expected_name_records(
     server_cfg, netbios_name: str, workgroup: str,
 ) -> set[NameRecord]:
     """Full set of (name, type, is_group) registrations implied by *cfg*.
 
-    Matches the iteration order of ``NBNSServer._register_names``:
-    every ``(primary + alias)`` times three service types (workstation,
+    The names ``NBNSServer._register_names`` claims: every
+    ``(primary + alias)`` times three service types (workstation,
     messenger, server) as unique names, plus the workgroup as a
     group-name registration.  Diffing the old and new sets yields
     the exact names to release and to register on a live-update

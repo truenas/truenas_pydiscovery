@@ -4,9 +4,9 @@ Host-announcement cadence and browser-election payloads on port
 138 per [MS-BRWS].
 
 - `announcer.py`:
-  - `BrowseAnnouncer` — sends periodic HostAnnouncements to
-    `WORKGROUP<0x1d>` via the `\MAILSLOT\BROWSE` datagram
-    (MS-BRWS §2.2.1), framed by
+  - `BrowseAnnouncer` — sends periodic HostAnnouncements
+    (MS-BRWS §2.2.1) to `WORKGROUP<0x1d>` via the `\MAILSLOT\BROWSE`
+    datagram (§3.2.5.2), framed by
     `truenas_pynetbiosns.protocol.datagram.build_mailslot_datagram`
     with the subnet's address as SOURCE_IP.  Announcement intervals
     start at 1 minute and double to a 12-minute cap, matching nmbd

@@ -1,7 +1,7 @@
 """Link-flap throttling on hot-plug re-probing.
 
-Mirrors Apple mDNSResponder's ``mDNS_RegisterInterface`` flap
-handling at ``mDNSCore/mDNS.c:14262-14273``: re-registration within
+Our policy (see ``LINK_FLAP_WINDOW``, after the ``SlowActivation`` of
+earlier mDNSResponder releases): re-registration within
 ``LINK_FLAP_WINDOW`` triggers a longer probe delay and reduces the
 announcement count to one packet.
 
@@ -85,6 +85,8 @@ def _build_server() -> tuple[MDNSServer, EntryGroup, _Captured]:
     server._interfaces = {1: _IfState()}
     server._last_link_up = {}
     server._pending_link_ups = {}
+    server._rebuild_lock = None
+    server._rebuild_lock_loop = None
 
     captured = _Captured()
     server._probe_and_announce = captured.handler  # type: ignore[method-assign]

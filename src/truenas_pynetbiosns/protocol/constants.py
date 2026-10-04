@@ -171,7 +171,9 @@ DNS_MAX_LABEL_LENGTH = 63
 # Timing constants (RFC 1002 s6 — DEFINED CONSTANTS)
 # ---------------------------------------------------------------------------
 
-# Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT)
+# Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT).
+# The count is of transmissions: "Transmission of the request is
+# attempted BCAST_REQ_RETRY_COUNT times" (RFC 1001 s15.2.1).
 # nmbd instead resends a broadcast request 3 times after the first, one
 # time(NULL) second apart (``make_response_record`` in
 # source3/nmbd/nmbd_responserecordsdb.c).

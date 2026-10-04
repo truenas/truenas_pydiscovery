@@ -7,7 +7,7 @@ Wire protocol: parsing and building NetBIOS Name Service packets per RFC 1002.
 - `constants.py` — ports (137/138), opcodes, name types (0x00 workstation, 0x03 messenger, 0x20 server), header flags, NB rdata flags, timing values, browse opcodes, server type flags, NetBIOS datagram types/flags and mailslot-write constants
 - `name.py` — `NetBIOSName` dataclass, first-level (half-ASCII) encoding/decoding. 15-char names are space-padded and uppercased, the 16th byte is the service type suffix, each byte becomes two wire bytes via nibble-split + 0x41. Optional scope encoded as DNS-style labels.
 - `message.py` — `NBNSMessage`, `NBQuestion`, `NBResourceRecord` with full packet serialization and convenience builders (`build_name_query`, `build_registration`, `build_release`, `build_refresh`, `build_positive_response`, `build_negative_response`, `build_node_status_query`, `build_node_status_response`)
-- `datagram.py` — port-138 framing for browser frames: `build_mailslot_write` (SMB_COM_TRANSACTION mailslot write, MS-MAIL §2.2.1) and `build_mailslot_datagram` (DIRECT_GROUP NetBIOS datagram, RFC 1002 §4.4.2), laid out as Samba nmbd's `send_mailslot` builds them
+- `datagram.py` — port-138 framing for browser frames: `build_mailslot_write` (SMB_COM_TRANSACTION mailslot write, MS-MAIL §2.2.1) and `build_mailslot_datagram` (DIRECT_GROUP NetBIOS datagram, RFC 1002 §4.4.2), laid out as Samba nmbd's `send_mailslot` builds them apart from the source node type (B node; nmbd marks its datagrams M node)
 
 ## NetBIOS Name Wire Encoding
 

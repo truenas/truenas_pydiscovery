@@ -7,12 +7,14 @@ carried as the USER_DATA of a DIRECT_GROUP NetBIOS datagram on UDP 138
 
 The byte layout is Samba nmbd's (``send_mailslot`` in
 ``source3/nmbd/nmbd_packets.c``, ``build_dgram`` in
-``source3/libsmb/nmblib.c``): every SMB header field other than the
-protocol and command is zero, and the data follows the mailslot name
-directly.  MS-MAIL §2.2.1 instead pads the data to a 32-bit boundary
-and suggests non-zero Flags/Flags2/PIDLow, which receivers must
-ignore; receivers find the data through DataOffset, as Samba's
-``process_dgram`` does, so either form parses.
+``source3/libsmb/nmblib.c``) except for the datagram's source node
+type (see ``build_mailslot_datagram``): every SMB header field other
+than the protocol and command is zero, and the data follows the
+mailslot name directly.  MS-MAIL §2.2.1 instead requires Padding "large
+enough so that the DataBytes field is 32-bit aligned" and suggests
+non-zero Flags/Flags2/PIDLow, which receivers must ignore.  A receiver
+"MUST read the DataOffset field" to find the data (MS-MAIL §3.2.5.1),
+as Samba's ``process_dgram`` does, so either form parses.
 """
 from __future__ import annotations
 
@@ -92,10 +94,26 @@ def build_mailslot_datagram(
     mailslot write of *data* from ``source_name<source_type>`` to
     ``dest_name<dest_type>``.
 
+    MSG_TYPE is DIRECT_GROUP whatever the destination, as Samba nmbd's
+    ``send_announcement`` sends every browse announcement
+    (``send_mailslot`` with *unique* false) to the subnet broadcast
+    address, the HostAnnouncement to the unique name
+    ``<workgroup>[0x1D]`` (MS-BRWS §2.1.1.1) included.  This departs
+    from MS-MAIL §3.1.4.1, whose product note <13> reads "For unique
+    names, MSG_TYPE is 0x10 (DIRECT_UNIQUE)", and from RFC 1001 §17.2,
+    under which a datagram for a unique name "is unicast to the sole
+    owner of the name".  The same section has a node that does not
+    hold the destination name discard a group-name datagram quietly
+    but answer a unique-name one with a DATAGRAM ERROR, so broadcasting
+    a DIRECT_UNIQUE datagram instead would invite an error from every
+    other node on the subnet.  nmbd's ``process_dgram`` accepts either
+    type.
+
     The datagram is unfragmented (FIRST set, PACKET_OFFSET 0) and comes
     from a B node: every name this daemon holds is a B-node broadcast
-    registration.  DGM_LENGTH counts the encoded names and the user
-    data, not the fixed header (RFC 1002 §5.3.1).
+    registration.  nmbd's ``send_mailslot`` marks every datagram as
+    from an M node instead.  DGM_LENGTH counts the encoded names and
+    the user data, not the fixed header (RFC 1002 §5.3.1).
     """
     names = (
         encode_netbios_name(source_name, source_type, scope)

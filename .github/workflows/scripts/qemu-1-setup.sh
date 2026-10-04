@@ -11,12 +11,14 @@ echo "Setting up QEMU environment..."
 export DEBIAN_FRONTEND="noninteractive"
 sudo apt-get -y update
 
-# virtinst rather than virt-manager: no GUI dependencies.
+# virtinst rather than virt-manager: no GUI dependencies.  ovmf is the
+# VM's UEFI firmware, which qemu-system-x86 only recommends.
 sudo apt-get install -y --no-install-recommends \
   cloud-image-utils \
   guestfs-tools \
   virtinst \
   qemu-system-x86 \
+  ovmf \
   qemu-utils \
   libvirt-daemon-system \
   libvirt-clients \

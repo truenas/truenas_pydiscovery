@@ -38,9 +38,11 @@ Otherwise each protocol updates the interfaces whose addresses changed
 and leaves the others alone:
 .TP
 \(bu
-NetBIOS NS rebuilds the subnets on such an interface and registers its
-names on them; the names of a subnet whose address is gone are not
-released.
+NetBIOS NS registers its names on the subnet of each new address and
+closes the subnet of an address that is gone without releasing its
+names, as Samba's nmbd does; its other subnets keep their names.
+If the address it sends from on that interface goes away, it sets the
+interface's remaining subnets up afresh and registers their names again.
 .TP
 \(bu
 mDNS sends goodbyes for the address records it no longer publishes
@@ -115,8 +117,10 @@ Write runtime status for every enabled protocol to its per\-protocol
 status.json under \fI/run/truenas\-discovery\fP.
 .TP
 .BR SIGTERM ", " SIGINT
-Graceful shutdown: each protocol sends its goodbye / release / bye
-frames and closes sockets.
+Graceful shutdown: mDNS sends goodbyes, WS\-Discovery sends a Bye, and
+NetBIOS NS sends a host announcement marking the server removed, then
+each closes its sockets.
+Like Samba's nmbd, NetBIOS NS releases no names at shutdown.
 A shutdown requested during startup abandons the rest of startup, one
 requested during a reload abandons the reload, and a held SIGHUP is
 dropped.

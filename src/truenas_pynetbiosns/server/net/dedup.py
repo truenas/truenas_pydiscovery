@@ -16,13 +16,14 @@ nmbd's per-round memory, the window also catches a copy read in a
 later pass.
 
 A retransmission reuses the request's NAME_TRN_ID and is answered again
-when it arrives after the window, as it always does from a sender that
-waits BCAST_REQ_RETRY_TIMEOUT (250 ms, RFC 1002 §6) between
-transmissions.  nmbd counts its retransmission interval in whole
-seconds of ``time(NULL)``
-(``make_response_record``, ``retransmit_or_expire_response_records``),
-so its first resend can follow the original within the window.  That
-resend is dropped; the original it repeats has already been dispatched.
+when it arrives after the window, as it always does from us (1 s apart,
+``REGISTRATION_RETRY_INTERVAL``) and from a sender that waits
+BCAST_REQ_RETRY_TIMEOUT (250 ms, RFC 1002 §6) between transmissions.
+nmbd counts its retransmission interval in whole seconds of
+``time(NULL)`` (``make_response_record``,
+``retransmit_or_expire_response_records``), so its first resend can
+follow the original within the window.  That resend is dropped; the
+original it repeats has already been dispatched.
 """
 from __future__ import annotations
 

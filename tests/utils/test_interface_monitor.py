@@ -210,16 +210,24 @@ class TestSettleTimer:
         return fired
 
     def test_burst_fires_once_after_the_quiet_period(self):
-        fired = self._fired([0.0, 0.01, 0.02, 0.03])
+        """Notes 10 ms apart against a 200 ms quiet period: only a loop
+        stalled for most of that could split the burst."""
+        fired = self._fired(
+            [0.0, 0.01, 0.02, 0.03], quiet=0.2, maximum=1.0, run_for=0.6,
+        )
         assert len(fired) == 1
-        assert fired[0] >= 0.03 + 0.05 - 0.005
+        assert fired[0] >= 0.03 + 0.2 - 0.005
 
     def test_steady_stream_fires_by_the_maximum(self):
+        """Due at the 0.2 s maximum.  Without it the stream would hold
+        the callback off until 50 ms after its last note, at 0.53 s;
+        the bound sits between the two, leaving room for a loaded
+        event loop."""
         fired = self._fired(
             [i * 0.02 for i in range(25)], quiet=0.05, maximum=0.2,
             run_for=0.7,
         )
-        assert fired and fired[0] < 0.25
+        assert fired and fired[0] < 0.4
         assert len(fired) >= 2
 
     def test_notes_after_a_burst_start_another(self):

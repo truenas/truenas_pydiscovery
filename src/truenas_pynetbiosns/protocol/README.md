@@ -50,14 +50,15 @@ Daemon registers HOSTNAME<0x20> (file server) on startup:
 ```
   truenas                                     broadcast:137
        |                                           |
-       |  REGISTRATION (x3 at 250ms intervals)     |
+       |  REGISTRATION (x4, 1 s apart, as nmbd)    |
        |  Opcode: REGISTRATION (5)                 |
        |  QD: TRUENAS<20> NB?                      |
        |  AR: TRUENAS<20> NB 192.168.1.100         |
        |  Flags: RD, BROADCAST                     |
        |------------------------------------------>|
        |                                           |
-       |          (no negative response)           |
+       |    (no negative response 1 s after the    |
+       |     last request)                         |
        |                                           |
        | → name registered in local table          |
 ```
@@ -124,12 +125,15 @@ A Windows client resolves a NetBIOS name:
 
 ### Name Release (RFC 1002 s4.2.10)
 
-Daemon releases names on shutdown:
+The daemon releases a name it stops using while running (a reload that
+renames the host or drops an alias), as nmbd releases a name it gives
+up.  Like nmbd, it releases no name at shutdown or when it rebuilds a
+subnet:
 
 ```
   truenas                                     broadcast:137
        |                                           |
-       |  RELEASE (for each registered name)       |
+       |  RELEASE (for each name given up)         |
        |  Opcode: RELEASE (6)                      |
        |  QD: TRUENAS<20> NB?                      |
        |  AR: TRUENAS<20> NB TTL=0                 |
@@ -150,6 +154,9 @@ Periodic server announcement to browse list:
        |  ServerName: TRUENAS                         |
        |  ServerType: WORKSTATION | SERVER            |
        |  Comment: "TrueNAS Server"                   |
-       |  (intervals: 1m, 2m, 4m... cap 12m)          |
+       |  (intervals: 1m, 2m, 3m... cap 12m, as nmbd)  |
        |--------------------------------------------->|
 ```
+
+At shutdown the daemon announces the server as removed, as nmbd does:
+the same HostAnnouncement with ServerType 0 and Periodicity 0.

@@ -73,10 +73,10 @@ class TestRegistrationBroadcastOnStartup:
     def test_daemon_emits_retry_count_registration_packets(
         self, candidate_interface, has_broadcast, tmp_path,
     ):
-        """At startup the daemon emits ``REGISTRATION_RETRY_COUNT``
-        broadcast REGISTRATION packets for each of its NetBIOS
-        names.  Capture them on the wire before the daemon has
-        finished broadcasting."""
+        """At startup the daemon broadcasts the REGISTRATION request
+        for each of its NetBIOS names, and resends it
+        ``REGISTRATION_RETRY_COUNT`` times.  Capture them on the wire
+        before the daemon has finished broadcasting."""
         if not has_broadcast:
             pytest.skip("NetBIOS NS requires broadcast-capable interface")
 
@@ -131,9 +131,10 @@ class TestRegistrationBroadcastOnStartup:
         capturer.join(timeout=5.0)
 
         try:
-            # We don't assert an exact count because REGISTRATION
-            # and REFRESH may both go out; the invariant is "at
-            # least RETRY_COUNT packets naming PYTESTHOST".
+            # We don't assert an exact count: several name types share
+            # the name, and the capture can end before the last
+            # resends.  The invariant is "at least RETRY_COUNT packets
+            # naming PYTESTHOST".
             assert len(collected) >= REGISTRATION_RETRY_COUNT, (
                 f"expected at least {REGISTRATION_RETRY_COUNT} "
                 f"REGISTRATION packets for {netbios_name}, got "

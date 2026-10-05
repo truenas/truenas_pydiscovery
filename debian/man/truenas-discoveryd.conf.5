@@ -117,11 +117,13 @@ The daemon notices on its own when the tokens resolve to different
 entries because an interface gained, lost or changed an IPv4 address
 (see
 .BR truenas\-discoveryd (8)):
-it rebuilds the entries of each interface affected and registers the
-names on them again, leaving the other interfaces alone, so an
-interface skipped at startup is served once it has an address.
-A reload that resolves the tokens to different entries releases the
-names, rebuilds every entry and registers the names again.
+it registers the names on each new entry and closes each entry that is
+gone, leaving the others alone, so an interface skipped at startup is
+served once it has an address.
+A reload that resolves the tokens to different entries, for instance
+after this option changes, does the same.
+Neither releases a name, as Samba's nmbd releases none when it closes a
+subnet.
 .TP
 .B netbios-name
 Primary 15\-char NetBIOS name.

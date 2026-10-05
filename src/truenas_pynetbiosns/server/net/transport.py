@@ -168,6 +168,11 @@ class NBNSTransport:
         """True if the name service unicast socket is open."""
         return self._sock_nmb_unicast is not None
 
+    @property
+    def interface_addr(self) -> str:
+        """The interface address the unicast sockets are bound to."""
+        return self._ifaddr
+
     # -- Send ---------------------------------------------------------------
     #
     # All sends go through the unicast socket — its bound source IP

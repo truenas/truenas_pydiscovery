@@ -40,7 +40,7 @@ src/
 
   truenas_pynetbiosns/          # NetBIOS Name Service + Browser
     protocol/                   # Wire protocol (RFC 1001/1002)
-    server/                     # Registration, defense, refresh, browse announcements
+    server/                     # Registration, defense, browse announcements
     client/                     # CLI tools: lookup, status
 
   truenas_pywsd/                # Web Services Discovery
@@ -73,19 +73,21 @@ One unified daemon.  `-c CONFIG` for config file, `-v` for
 verbosity (syslog by default, stderr with `-v`).  Signals:
 `SIGHUP` reloads every enabled protocol, `SIGUSR1` writes
 per-protocol status JSONs, `SIGTERM` / `SIGINT` for graceful
-shutdown (each protocol emits its own goodbye / bye / release
-frames before closing sockets).
+shutdown (mDNS sends goodbyes, WS-Discovery a Bye, and NetBIOS NS a
+HostAnnouncement marking the server removed before closing sockets;
+like nmbd, NetBIOS NS releases no names at shutdown).
 
 Interface and address changes need no reload.  The daemon follows the
 kernel's netlink notifications (`truenas_pydiscovery_utils.interface_monitor`)
 and, once they have been quiet for a second (at most five seconds after
 the first), reads the interfaces again.  If anything differs, each
 protocol updates the interfaces whose addresses changed: NetBIOS NS
-rebuilds their subnets, mDNS says goodbye for addresses it no longer
-publishes and probes and announces again, WS-Discovery serves the new
-addresses and sends Hello.  An interface configured before it exists,
-or before it has an address, is served once it has one.  See
-`truenas-discoveryd(8)`, INTERFACE CHANGES.
+claims its names on new subnets and closes vanished ones, mDNS says
+goodbye for addresses it no longer publishes and probes and announces
+again, WS-Discovery serves the new addresses and sends Hello.  An
+interface configured before it exists, or before it has an address, is
+served once it has one.  See `truenas-discoveryd(8)`, INTERFACE
+CHANGES.
 
 ```bash
 truenas-discoveryd -c /etc/truenas-discovery/truenas-discoveryd.conf

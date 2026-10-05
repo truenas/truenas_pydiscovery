@@ -13,9 +13,8 @@ from .config import DaemonConfig, get_netbios_name
 from .browse.announcer import BrowseAnnouncer
 from .core.defender import Defender
 from .core.nametable import NameTable
-from .core.refresher import Refresher
 from .core.registrar import Registrar
-from .core.release import NameRecord, release_all_names, release_names
+from .core.release import NameRecord, release_names
 from .net.dedup import PacketDedup
 from .net.global_receiver import NBNSGlobalReceiver
 from .net.subnet import NbnsSubnet, resolve_subnets
@@ -44,7 +43,7 @@ class PerSubnetState:
 
     __slots__ = (
         "subnet", "transport", "name_table",
-        "registrar", "defender", "refresher", "responder",
+        "registrar", "defender", "responder",
         "browse_announcer",
     )
 
@@ -56,7 +55,6 @@ class PerSubnetState:
         self.name_table = NameTable()
         self.registrar: Registrar | None = None
         self.defender: Defender | None = None
-        self.refresher: Refresher | None = None
         self.responder: Responder | None = None
         self.browse_announcer: BrowseAnnouncer | None = None
 
@@ -65,12 +63,8 @@ class PerSubnetState:
 
         The transport is NOT stopped here: it's shared across every
         subnet living on the same interface, so its lifecycle is
-        daemon-owned (``_transports`` dict).  Name releases are
-        protocol-level behaviour and stay in the daemon where the
-        broadcast-send closure is built.
+        daemon-owned (``_transports`` dict).
         """
-        if self.refresher is not None:
-            self.refresher.cancel()
         if self.browse_announcer is not None:
             self.browse_announcer.cancel()
 
@@ -154,12 +148,13 @@ class NBNSServer(ConfigDaemon):
     async def _stop(self) -> None:
         logger.info("Stopping NetBIOS NS daemon")
 
+        # As nmbd's ``terminate`` does: announce the server as gone
+        # (``announce_my_servers_removed``) and release no name.  nmbd
+        # releases only names registered with a WINS server
+        # (``release_wins_names``).
         for state in self._subnets:
-            release_all_names(
-                _broadcast_sender(state.transport, state.subnet),
-                state.name_table,
-                state.subnet.my_ip,
-            )
+            if state.browse_announcer is not None:
+                state.browse_announcer.announce_removed()
 
         for state in self._subnets:
             state.stop()
@@ -181,25 +176,26 @@ class NBNSServer(ConfigDaemon):
     async def _reload(self) -> None:
         """SIGHUP: reconcile live state with the new config, minimally.
 
-        Resolves ``interfaces`` again, then picks one of two paths
-        based on what changed since the previous ``apply_config``:
+        Resolves ``interfaces`` again and, as nmbd's SIGHUP handler
+        runs ``reload_interfaces`` (``source3/nmbd/nmbd.c``), leaves
+        alone the subnets it still resolves to:
 
-        * **full rebuild** — interfaces changed, the IPv4 subnets
-          they resolve to changed, or no configuration has been
-          applied yet (no ``_prev_config`` to diff against).
-          Broadcasts release for every registered name, tears down
-          transports, rebuilds.
-        * **live update** — name set, workgroup, or server_string
-          changed.  Releases only the names that actually went
-          away, registers newly-added names, updates browse
-          announcer payloads in place; transports stay bound.
+        * the subnets that are gone are closed, releasing no name
+          (``_close_subnets``);
+        * on the subnets that remain, the names follow the config if
+          the name set, workgroup or server_string changed
+          (``_live_update_reload``);
+        * the subnets that are new are set up and claim the names
+          (``_open_subnets``).
+
+        With no configuration applied before (no ``_prev_config`` to
+        diff against), everything is rebuilt (``_full_rebuild_reload``).
 
         Interface and address changes between reloads are followed by
         ``_reconcile_interfaces``; resolving again here keeps a reload
-        consistent with the interfaces as they are when it runs, as
-        nmbd's SIGHUP handler runs ``reload_interfaces``
-        (``source3/nmbd/nmbd.c``).  If the new ``interfaces`` value
-        cannot be resolved, the current state is kept."""
+        consistent with the interfaces as they are when it runs.  If
+        the new ``interfaces`` value cannot be resolved, the current
+        state is kept."""
         prev = self._prev_config
         cur = self._config
 
@@ -212,36 +208,29 @@ class NBNSServer(ConfigDaemon):
             logger.error("Reload: cannot resolve interfaces: %s", e)
             return
 
-        if (
-            prev is None
-            or prev.server.interfaces != cur.server.interfaces
-            or set(subnets) != set(self._resolved_subnets)
-        ):
+        if prev is None:
             await self._full_rebuild_reload(subnets)
             return
 
-        if prev.server == cur.server:
+        changed = await self._close_subnets(set(subnets))
+        if prev.server != cur.server:
+            await self._live_update_reload()
+        elif not changed:
             logger.info("Reload: no config changes")
             return
-
-        await self._live_update_reload()
+        if changed:
+            await self._open_subnets(subnets, changed, loop)
 
     async def _full_rebuild_reload(self, subnets: list[NbnsSubnet]) -> None:
         """Tear down transports and registrations, rebuild on *subnets*.
 
-        The only path that closes and re-opens per-interface NBNS
-        transports.  Fires when ``interfaces`` or the subnets it
-        resolves to change, and when no configuration has been
-        applied yet."""
+        Runs when no configuration has been applied yet.  No name is
+        released, as nmbd's ``close_subnet`` releases none when
+        ``reload_interfaces`` closes a subnet."""
         logger.info("Reload: full rebuild")
 
         for state in self._subnets:
             state.stop()
-            release_all_names(
-                _broadcast_sender(state.transport, state.subnet),
-                state.name_table,
-                state.subnet.my_ip,
-            )
 
         for transport in self._transports.values():
             await transport.stop()
@@ -276,16 +265,19 @@ class NBNSServer(ConfigDaemon):
         """Serve the subnets ``interfaces`` resolves to now.
 
         Called once interface and address changes have settled (the
-        composite's ``InterfaceMonitor``).  Only interfaces whose
-        subnets changed are touched, and each of those is set up
-        afresh, since its transport is bound to one of its subnet
-        addresses: its subnets are rebuilt and claim their names again.
-        The names of a subnet whose address is gone are not released,
-        that address being gone.  This is the shape of nmbd's
-        ``reload_interfaces``, which makes a subnet for each new address
-        (``make_normal_subnet``, ``register_my_workgroup_one_subnet``)
-        and closes the subnet of each vanished one (``close_subnet``);
-        nmbd polls for them every ``NMBD_INTERFACES_RELOAD`` (120 s).
+        composite's ``InterfaceMonitor``), as nmbd's
+        ``reload_interfaces`` follows them: a subnet for each new
+        address, which claims its names (``make_normal_subnet``,
+        ``register_my_workgroup_one_subnet``); the subnet of each
+        vanished address closed without releasing its names
+        (``close_subnet``); and every other subnet left alone, its
+        names still held.  nmbd polls for changes every
+        ``NMBD_INTERFACES_RELOAD`` (120 s).
+
+        nmbd opens sockets for each subnet, where one transport serves
+        all the subnets of an interface here, bound to one of their
+        addresses.  When that address goes away, the interface is set
+        up afresh and its remaining subnets claim their names again.
         If ``interfaces`` cannot be resolved, the current state is
         kept."""
         if not self._config.server.interfaces:
@@ -304,30 +296,60 @@ class NBNSServer(ConfigDaemon):
         self, subnets: list[NbnsSubnet], loop: asyncio.AbstractEventLoop,
     ) -> None:
         """``_reconcile_interfaces`` for the resolved *subnets*."""
+        changed = await self._close_subnets(set(subnets))
+        if changed:
+            await self._open_subnets(subnets, changed, loop)
+
+    async def _close_subnets(self, current: set[NbnsSubnet]) -> set[str]:
+        """Close each served subnet not in *current*, releasing no name,
+        and every subnet of an interface whose transport is bound to an
+        address that went away; return the names of the interfaces
+        whose subnets changed."""
         changed = {
             subnet.interface_name
-            for subnet in set(self._resolved_subnets).symmetric_difference(
-                subnets,
-            )
+            for subnet in set(self._resolved_subnets) ^ current
         }
         if not changed:
-            return
+            return changed
         logger.info("Subnets changed on %s", ", ".join(sorted(changed)))
+        bound = {
+            name: transport.interface_addr
+            for name, transport in self._transports.items()
+        }
+        rebuilt = {
+            name for name in changed
+            if not any(
+                subnet.interface_name == name
+                and str(subnet.my_ip) == bound.get(name)
+                for subnet in current
+            )
+        }
         for state in [
             state for state in self._subnets
-            if state.subnet.interface_name in changed
+            if state.subnet.interface_name in rebuilt
+            or state.subnet not in current
         ]:
             state.stop()
             self._subnets.remove(state)
-        for name in sorted(changed):
+        for name in sorted(rebuilt):
             transport = self._transports.pop(name, None)
             if transport is not None:
                 await transport.stop()
+        return changed
 
+    async def _open_subnets(
+        self,
+        subnets: list[NbnsSubnet],
+        changed: set[str],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Serve *subnets*: set up those of the *changed* interfaces
+        not served yet, and claim the names on them."""
         self._resolved_subnets = subnets
+        served = {state.subnet for state in self._subnets}
         kept = len(self._subnets)
         for subnet in subnets:
-            if subnet.interface_name in changed:
+            if subnet.interface_name in changed and subnet not in served:
                 await self._setup_subnet(subnet, loop)
         if self._global_recv is not None:
             self._global_recv.update_subnets(subnets)
@@ -336,17 +358,18 @@ class NBNSServer(ConfigDaemon):
         ))
 
     async def _live_update_reload(self) -> None:
-        """In-place reconciliation for non-interface config changes.
+        """In-place reconciliation of the names on the served subnets.
 
-        Runs when the set of interfaces is unchanged but something
-        else in the [netbiosns] config differs — a new alias, a
-        workgroup rename, a server-string tweak from middleware.
-        Diffs the set of (name, type, is_group) registrations
-        implied by the old vs. new config:
+        Runs when the [netbiosns] config differs from the previous one
+        — a new alias, a workgroup rename, a server-string tweak from
+        middleware — on the subnets that remain after
+        ``_close_subnets``.  Diffs the set of (name, type, is_group)
+        registrations implied by the old vs. new config:
 
-        * Names that went away are released on every subnet and
-          pulled from each name table so the refresher and
-          responder stop touching them.
+        * Names that went away are released on every subnet, as
+          nmbd releases a name it gives up while running
+          (``unbecome_local_master_browser``), and pulled from each
+          name table so the responder stops answering for them.
         * Names newly present are registered via the existing
           registrar.
         * Each subnet's ``BrowseAnnouncer`` gets its cached
@@ -457,12 +480,9 @@ class NBNSServer(ConfigDaemon):
         state.responder = Responder(
             transport.send_unicast, state.name_table,
         )
-        state.refresher = Refresher(
-            send_broadcast,
-            state.name_table,
-            subnet.my_ip,
-        )
-        state.refresher.start()
+        # No name refresh: nmbd refreshes only names registered with a
+        # WINS server (``refresh_my_names``), and RFC 1001 §15.5.1
+        # leaves refresh to P and M nodes.
 
         # MS-BRWS §3.2.5.2: periodic HostAnnouncement on port 138.
         state.browse_announcer = BrowseAnnouncer(

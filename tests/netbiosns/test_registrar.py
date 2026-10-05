@@ -1,10 +1,13 @@
 """Registrar for NetBIOS name registration (RFC 1002 s4.2.2).
 
-Broadcasts one registration request up to REGISTRATION_RETRY_COUNT
-times, each followed by a REGISTRATION_RETRY_INTERVAL wait (RFC 1002
-s5.1.1.1); if no negative response carrying the request's NAME_TRN_ID
-arrives by the end of the last wait, the name transitions from pending
-to registered in the local NameTable.
+Broadcasts one registration request and resends it
+REGISTRATION_RETRY_COUNT times, each transmission followed by a
+REGISTRATION_RETRY_INTERVAL wait, as Samba nmbd times a broadcast
+registration; if no negative response carrying the request's
+NAME_TRN_ID arrives by the end of the last wait, the name transitions
+from pending to registered in the local NameTable.  Tests of the claim
+logic run with a shorter interval; ``test_transmissions_follow_nmbd_timing``
+checks the real one.
 """
 from __future__ import annotations
 
@@ -18,7 +21,6 @@ from truenas_pynetbiosns.protocol.constants import (
     NameType,
     Opcode,
     REGISTRATION_RETRY_COUNT,
-    REGISTRATION_RETRY_INTERVAL,
     RRType,
     Rcode,
 )
@@ -32,7 +34,14 @@ from truenas_pynetbiosns.server.net.transport import NBNSTransport
 from truenas_pynetbiosns.server.server import NBNSServer, PerSubnetState
 
 
-def _run(coro, timeout: float = 3.0) -> object:
+# The interval for tests of the claim logic rather than its timing:
+# long enough that a response sent 50 ms into a claim arrives before
+# the first resend.
+_INTERVAL = 0.2
+_TRANSMISSIONS = 1 + REGISTRATION_RETRY_COUNT
+
+
+def _run(coro, timeout: float = 10.0) -> object:
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(
@@ -45,20 +54,22 @@ def _run(coro, timeout: float = 3.0) -> object:
 def _new_pair() -> tuple[list[NBNSMessage], NameTable, Registrar]:
     sent: list[NBNSMessage] = []
     table = NameTable()
-    reg = Registrar(sent.append, table)
+    reg = Registrar(sent.append, table, retry_interval=_INTERVAL)
     return sent, table, reg
 
 
 class TestRegisterSuccessPath:
-    def test_sends_retry_count_packets(self):
+    def test_sends_the_request_and_its_resends(self):
         sent, _, reg = _new_pair()
         assert _run(
             reg.register("HOSTA", 0x20, IPv4Address("10.0.0.1")),
         ) is True
-        assert len(sent) == REGISTRATION_RETRY_COUNT
+        assert len(sent) == _TRANSMISSIONS
 
-    def test_interval_between_first_two_packets(self):
-        """Gap between packet 1 and 2 matches REGISTRATION_RETRY_INTERVAL."""
+    def test_transmissions_follow_nmbd_timing(self):
+        """nmbd resends a broadcast registration 3 times, 1 s apart,
+        and takes the name 1 s after the last
+        (``make_response_record``, ``register_name_timeout_response``)."""
         stamps: list[float] = []
         table = NameTable()
         reg = Registrar(
@@ -66,13 +77,15 @@ class TestRegisterSuccessPath:
         )
 
         _run(reg.register("HOSTB", 0x20, IPv4Address("10.0.0.2")))
-        assert len(stamps) >= 2
-        gap = stamps[1] - stamps[0]
-        assert (
-            REGISTRATION_RETRY_INTERVAL * 0.7
-            <= gap
-            <= REGISTRATION_RETRY_INTERVAL * 1.5
-        ), f"gap {gap:.3f}s outside tolerance"
+        claimed = time.monotonic()
+        nmbd_interval = 1.0
+        assert len(stamps) == 4
+        for earlier, later in zip(stamps, stamps[1:]):
+            gap = later - earlier
+            assert (
+                nmbd_interval * 0.7 <= gap <= nmbd_interval * 1.5
+            ), f"gap {gap:.3f}s outside tolerance"
+        assert claimed - stamps[-1] >= nmbd_interval * 0.7
 
     def test_successful_register_marks_name_registered(self):
         _, table, reg = _new_pair()
@@ -89,7 +102,7 @@ class TestRegisterSuccessPath:
         packet (``retransmit_or_expire_response_records``)."""
         sent, _, reg = _new_pair()
         _run(reg.register("HOSTF", 0x20, IPv4Address("192.0.2.6")))
-        assert len(sent) == REGISTRATION_RETRY_COUNT
+        assert len(sent) == _TRANSMISSIONS
         assert len({msg.trn_id for msg in sent}) == 1
 
 
@@ -116,8 +129,8 @@ class TestConflictAbortsRegistration:
         assert table.lookup(target) is None
 
     def test_conflict_after_last_request_aborts_registration(self):
-        """RFC 1002 s5.1.1.1 pauses BCAST_REQ_RETRY_TIMEOUT after the
-        final request as well, so a negative response to that request
+        """nmbd waits a retry interval after the last request as well
+        before taking the name, so a negative response to that request
         still blocks the claim."""
         table = NameTable()
         target = NetBIOSName("HOSTE", 0x20)
@@ -125,13 +138,12 @@ class TestConflictAbortsRegistration:
 
         def send(msg: NBNSMessage) -> None:
             sent.append(msg)
-            if len(sent) == REGISTRATION_RETRY_COUNT:
+            if len(sent) == _TRANSMISSIONS:
                 asyncio.get_running_loop().call_later(
-                    REGISTRATION_RETRY_INTERVAL / 5,
-                    reg.on_conflict, target, msg.trn_id,
+                    _INTERVAL / 5, reg.on_conflict, target, msg.trn_id,
                 )
 
-        reg = Registrar(send, table)
+        reg = Registrar(send, table, retry_interval=_INTERVAL)
         result = _run(
             reg.register("HOSTE", 0x20, IPv4Address("192.0.2.5")),
         )
@@ -172,7 +184,7 @@ class TestConflictAbortsRegistration:
             return await task
 
         assert _run(drive()) is True
-        assert len(sent) == REGISTRATION_RETRY_COUNT
+        assert len(sent) == _TRANSMISSIONS
         entry = table.lookup(target)
         assert entry is not None and entry.registered
 
@@ -202,7 +214,9 @@ def _server_with_registrar(
         broadcast_addr=str(subnet.broadcast),
     ))
     sent: list[NBNSMessage] = []
-    state.registrar = Registrar(sent.append, state.name_table)
+    state.registrar = Registrar(
+        sent.append, state.name_table, retry_interval=_INTERVAL,
+    )
     server._subnets.append(state)
     return server, state.registrar, sent
 
@@ -242,7 +256,7 @@ class TestNegativeResponseDispatch:
             tmp_path, lambda request: (request.trn_id + 1) & 0xFFFF,
         )
         assert claimed is True
-        assert requests == REGISTRATION_RETRY_COUNT
+        assert requests == _TRANSMISSIONS
 
 
 class TestConcurrentClaims:
@@ -263,7 +277,7 @@ class TestConcurrentClaims:
             tmp_path, netbios_aliases=["NAS02"],
         )
         elapsed = self._claim_all(server)
-        one_claim = REGISTRATION_RETRY_COUNT * REGISTRATION_RETRY_INTERVAL
+        one_claim = _TRANSMISSIONS * _INTERVAL
         # Seven names one after another would take seven claim times.
         assert elapsed < 2 * one_claim
         table = server._subnets[0].name_table
@@ -276,7 +290,7 @@ class TestConcurrentClaims:
         workgroup = table.lookup(NetBIOSName("WG", NameType.WORKSTATION))
         assert workgroup is not None and workgroup.registered
         assert len({msg.trn_id for msg in sent}) == 7
-        assert len(sent) == 7 * REGISTRATION_RETRY_COUNT
+        assert len(sent) == 7 * _TRANSMISSIONS
 
     def test_a_name_listed_twice_is_claimed_once(self, tmp_path):
         server, _, sent = _server_with_registrar(
@@ -288,7 +302,7 @@ class TestConcurrentClaims:
             for msg in sent
         }
         assert len(claimed) == 7
-        assert len(sent) == 7 * REGISTRATION_RETRY_COUNT
+        assert len(sent) == 7 * _TRANSMISSIONS
 
     def test_a_defended_name_does_not_stop_the_others(self, tmp_path):
         server, _, sent = _server_with_registrar(tmp_path)

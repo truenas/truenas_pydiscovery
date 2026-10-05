@@ -7,6 +7,7 @@ checked against the address the daemon holds on that link.
 from __future__ import annotations
 
 import ipaddress
+import struct
 import subprocess
 import sys
 
@@ -14,9 +15,12 @@ import pytest
 
 from truenas_pynetbiosns.protocol.constants import (
     DGRAM_PORT,
+    NBNS_PORT,
     DatagramType,
     NameType,
+    Opcode,
 )
+from truenas_pynetbiosns.protocol.message import NBNSMessage
 from truenas_pynetbiosns.protocol.name import NetBIOSName
 
 from ..netbiosns.conftest import decode_mailslot
@@ -53,6 +57,28 @@ for level, kind, value in ancillary:
     if level == socket.IPPROTO_IP and kind == socket.IP_PKTINFO:
         print(socket.inet_ntoa(value[8:12]))
 print(data.hex())
+"""
+
+
+# Run in the client namespace: collect what reaches UDP 137 and 138
+# until stdin closes, then print "<port> <hex bytes>" per datagram.
+_COLLECT_DATAGRAMS = f"""
+import selectors, socket, sys
+selector = selectors.DefaultSelector()
+for port in ({NBNS_PORT}, {DGRAM_PORT}):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", port))
+    selector.register(sock, selectors.EVENT_READ, port)
+selector.register(sys.stdin, selectors.EVENT_READ, None)
+print("listening", flush=True)
+received = []
+while True:
+    for key, _events in selector.select():
+        if key.data is None:
+            for port, data in received:
+                print(port, data.hex())
+            sys.exit(0)
+        received.append((key.data, key.fileobj.recv(4096)))
 """
 
 
@@ -133,3 +159,49 @@ class TestBrowseAnnouncement:
         assert announcement["mailslot"] == "\\MAILSLOT\\BROWSE"
         server_name = announcement["data"][6:22].split(b"\0", 1)[0]
         assert server_name == NETBIOS_NAME.encode()
+
+    def test_stop_announces_the_server_removed_and_releases_no_name(
+        self, link: Link, serving: Discoveryd,
+    ):
+        """On stop, as nmbd's ``terminate`` does: a HostAnnouncement
+        with server type 0 and Periodicity 0
+        (``announce_my_servers_removed``), and no NAME RELEASE for a
+        broadcast-registered name."""
+        collector = subprocess.Popen(
+            ["ip", "netns", "exec", link.netns, sys.executable, "-c",
+             _COLLECT_DATAGRAMS],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert collector.stdout is not None
+            assert collector.stdout.readline().strip() == "listening"
+            result = serving.stop()
+            assert result.returncode == 0, result.stderr
+            out, err = collector.communicate(input="", timeout=30)
+        finally:
+            if collector.poll() is None:
+                collector.kill()
+                collector.wait()
+        assert collector.returncode == 0, err
+        received = [
+            (int(port), bytes.fromhex(data))
+            for port, data in (line.split() for line in out.splitlines())
+        ]
+        opcodes = [
+            NBNSMessage.from_wire(data).opcode
+            for port, data in received if port == NBNS_PORT
+        ]
+        assert Opcode.RELEASE not in opcodes
+        announcements = [
+            decode_mailslot(data)["data"]
+            for port, data in received if port == DGRAM_PORT
+        ]
+        removed = [
+            payload for payload in announcements
+            if payload[6:22].split(b"\0", 1)[0] == NETBIOS_NAME.encode()
+        ]
+        assert removed, f"no HostAnnouncement from {NETBIOS_NAME}"
+        periodicity_ms, = struct.unpack("<I", removed[-1][2:6])
+        server_type, = struct.unpack("<I", removed[-1][24:28])
+        assert (periodicity_ms, server_type) == (0, 0)

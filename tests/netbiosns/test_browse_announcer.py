@@ -1,9 +1,10 @@
 """NetBIOS Browse HostAnnouncement payload and scheduler.
 
 Covers MS-BRWS §2.2.1 payload layout (opcode, periodicity, hostname,
-server type, signature, comment) and §3.2.6 timer behaviour
-(ANNOUNCE_COUNT_STARTUP burst at ANNOUNCE_INTERVAL_INITIAL, doubling
-up to ANNOUNCE_INTERVAL_MAX).  Reference: Samba
+server type, signature, comment), the pacing of Samba nmbd's
+``announce_my_server_names`` (the first at once, then each interval a
+minute longer, up to 12 minutes) and the removal announcement of
+``announce_my_servers_removed``.  Reference: Samba
 ``source4/torture/nbt/register.c``.
 """
 from __future__ import annotations
@@ -12,9 +13,9 @@ import asyncio
 import struct
 import time
 from ipaddress import IPv4Address
+from itertools import islice
 
 from truenas_pynetbiosns.protocol.constants import (
-    ANNOUNCE_INTERVAL_INITIAL,
     DGRAM_PORT,
     BrowseOpcode,
     DatagramFlag,
@@ -25,6 +26,7 @@ from truenas_pynetbiosns.protocol.constants import (
 from truenas_pynetbiosns.protocol.name import NetBIOSName
 from truenas_pynetbiosns.server.browse.announcer import (
     BrowseAnnouncer,
+    announce_intervals,
     build_host_announcement,
 )
 
@@ -121,26 +123,37 @@ def _run(coro, timeout: float = 3.0) -> object:
         loop.close()
 
 
+class TestAnnounceIntervals:
+    def test_each_interval_is_a_minute_longer_up_to_twelve(self):
+        """nmbd's ``announce_my_server_names`` adds 60 s per
+        announcement until ``CHECK_TIME_MAX_HOST_ANNCE`` (12) minutes."""
+        assert list(islice(announce_intervals(), 14)) == [
+            60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720,
+            720, 720,
+        ]
+
+
 class TestAnnouncerSchedule:
-    def test_startup_burst_emits_announce_count_startup_packets(self):
-        """MS-BRWS §3.2.6: initial burst of ANNOUNCE_COUNT_STARTUP
-        frames, each payload tagged with its own Periodicity."""
+    def test_first_announcement_goes_out_at_once(self):
+        """The first announcement is not delayed; the next is a minute
+        away, so exactly one goes out at the start."""
         sent: list[bytes] = []
         a = BrowseAnnouncer(sent.append, "HOSTA", "WG", source_ip=_SOURCE_IP)
 
         async def drive() -> None:
             a.start()
-            # ANNOUNCE_INTERVAL_INITIAL is 60 s — we don't wait that
-            # long, just observe the first packet fires immediately.
             await asyncio.sleep(0.050)
             a.cancel()
 
         _run(drive())
-        assert len(sent) >= 1
+        assert len(sent) == 1
         d = _parse_host_announcement(decode_mailslot(sent[0])["data"])
         assert d["hostname"] == "HOSTA"
 
-    def test_periodicity_matches_current_delay(self):
+    def test_periodicity_is_the_time_until_the_next(self):
+        """The first announcement carries the first interval, one
+        minute, as nmbd's ``send_host_announcement`` carries "Time
+        until next announce"."""
         sent: list[bytes] = []
         a = BrowseAnnouncer(sent.append, "HOSTB", "WG", source_ip=_SOURCE_IP)
 
@@ -152,11 +165,23 @@ class TestAnnouncerSchedule:
         _run(drive())
         assert sent
         d = _parse_host_announcement(decode_mailslot(sent[0])["data"])
-        # First-burst periodicity equals ANNOUNCE_INTERVAL_INITIAL
-        # (seconds) in milliseconds.
-        assert d["periodicity_ms"] == int(
-            ANNOUNCE_INTERVAL_INITIAL * 1000,
-        )
+        assert d["periodicity_ms"] == 60_000
+
+    def test_removal_announcement_has_type_and_periodicity_zero(self):
+        """nmbd's ``announce_my_servers_removed`` announces the server
+        with type 0 and interval 0 at shutdown, to the same name and
+        mailslot as any HostAnnouncement."""
+        sent: list[bytes] = []
+        a = BrowseAnnouncer(sent.append, "HOSTC", "WG", source_ip=_SOURCE_IP)
+        a.announce_removed()
+        (frame,) = sent
+        datagram = decode_mailslot(frame)
+        d = _parse_host_announcement(datagram["data"])
+        assert d["hostname"] == "HOSTC"
+        assert d["server_type"] == 0
+        assert d["periodicity_ms"] == 0
+        assert datagram["dest"] == NetBIOSName("WG", NameType.LOCAL_MASTER)
+        assert datagram["mailslot"] == "\\MAILSLOT\\BROWSE"
 
     def test_cancel_before_start_is_safe(self):
         a = BrowseAnnouncer(

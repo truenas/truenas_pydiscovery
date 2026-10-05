@@ -152,20 +152,106 @@ class TestApplySubnets:
 
         _run(tmp_path, [d, a], scenario)
 
-    def test_new_subnet_on_the_same_interface_rebuilds_it(self, tmp_path):
-        """The interface's transport is bound to one of its subnet
-        addresses, so every subnet on it is set up again and claims
-        its names again."""
+    def test_new_subnet_on_the_same_interface_leaves_the_others(
+        self, tmp_path,
+    ):
+        """As nmbd's ``reload_interfaces`` makes a subnet for a new
+        address only: the existing subnet keeps its state, transport
+        and names, and only the new one claims."""
         a = _subnet("lo", "127.0.1.2", "127.0.1.255")
         b = _subnet("lo", "127.0.2.2", "127.0.2.255")
 
         async def scenario(server, loop):
             old = _states(server)[a.my_ip]
+            transport = server._transports["lo"]
             await server._apply_subnets([a, b], loop)
             states = _states(server)
-            assert states[a.my_ip] is not old
+            assert states[a.my_ip] is old
             assert _registered(states[a.my_ip])
             assert _registered(states[b.my_ip])
-            assert len(server._transports) == 1
+            assert server._transports == {"lo": transport}
 
         _run(tmp_path, [a], scenario)
+
+    def test_vanished_subnet_on_the_same_interface_leaves_the_others(
+        self, tmp_path,
+    ):
+        """The remaining subnet keeps answering for its names: they are
+        not claimed again."""
+        a = _subnet("lo", "127.0.1.2", "127.0.1.255")
+        b = _subnet("lo", "127.0.2.2", "127.0.2.255")
+
+        async def scenario(server, loop):
+            kept = _states(server)[a.my_ip]
+            transport = server._transports["lo"]
+            await server._apply_subnets([a], loop)
+            assert _states(server) == {a.my_ip: kept}
+            assert _registered(kept)
+            assert server._transports == {"lo": transport}
+
+        _run(tmp_path, [a, b], scenario)
+
+    def test_losing_the_bound_address_sets_the_interface_up_afresh(
+        self, tmp_path,
+    ):
+        """The interface's transport is bound to its first subnet's
+        address; when that goes, the remaining subnets are set up on a
+        new transport and claim their names again."""
+        a = _subnet("lo", "127.0.1.2", "127.0.1.255")
+        b = _subnet("lo", "127.0.2.2", "127.0.2.255")
+
+        async def scenario(server, loop):
+            old = _states(server)[b.my_ip]
+            assert server._transports["lo"].interface_addr == str(a.my_ip)
+            await server._apply_subnets([b], loop)
+            states = _states(server)
+            assert set(states) == {b.my_ip}
+            assert states[b.my_ip] is not old
+            assert _registered(states[b.my_ip])
+            assert server._transports["lo"].interface_addr == str(b.my_ip)
+
+        _run(tmp_path, [a, b], scenario)
+
+
+@needs_root
+class TestReloadKeepsSubnets:
+    def test_reload_that_adds_an_address_leaves_the_served_subnet(
+        self, tmp_path, dummy_link,
+    ):
+        """A reload that changes ``interfaces`` keeps serving the
+        subnets it still resolves to, as nmbd's SIGHUP runs
+        ``reload_interfaces``: their state and names stay, and only
+        the new subnet claims."""
+        subprocess.run(
+            ["ip", "addr", "add", "198.51.100.1/24", "brd", "+",
+             "dev", dummy_link],
+            check=True,
+        )
+
+        def config(*interfaces: str) -> DaemonConfig:
+            return DaemonConfig(
+                server=ServerConfig(
+                    netbios_name="NAS01", workgroup="WG",
+                    interfaces=list(interfaces),
+                ),
+                rundir=tmp_path,
+            )
+
+        server = NBNSServer(config("203.0.113.1"))
+
+        async def main() -> None:
+            try:
+                await server._reload()
+                (kept,) = server._subnets
+                transport = server._transports[dummy_link]
+                server.apply_config(config("203.0.113.1", "198.51.100.1"))
+                await server._reload()
+                states = _states(server)
+                assert states[kept.subnet.my_ip] is kept
+                assert _registered(kept)
+                assert _registered(states[IPv4Address("198.51.100.1")])
+                assert server._transports == {dummy_link: transport}
+            finally:
+                await server._stop()
+
+        asyncio.run(asyncio.wait_for(main(), timeout=30))

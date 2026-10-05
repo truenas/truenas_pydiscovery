@@ -3,8 +3,8 @@
 The live-update path lets middleware edits like "change server
 comment" or "add an alias" reconcile without releasing every
 registered name on the network.  These tests cover the name-diff
-helper, the ``release_names`` subset primitive, and the dispatcher
-that picks between full rebuild and live update.
+helper, the ``release_names`` subset primitive, and the paths a
+reload takes.
 
 No real transports are involved — we drive ``NBNSServer`` with
 ``interfaces=[]`` so ``_subnets`` stays empty and we only exercise
@@ -96,8 +96,8 @@ class TestExpectedNameRecords:
 
 class TestReleaseNames:
     """``release_names`` must release only the requested subset and
-    prune each released entry from the table so subsequent refreshes
-    and responses stop touching it."""
+    prune each released entry from the table so the responder stops
+    answering for it."""
 
     def _seed(self, table: NameTable, name: str, name_type: int,
               group: bool = False) -> None:
@@ -179,7 +179,9 @@ class TestReleaseNames:
 
 
 class TestReloadDispatch:
-    """Dispatcher picks full-rebuild vs. live-update path."""
+    """A reload rebuilds everything only when no configuration was
+    applied before; otherwise it closes the subnets that are gone,
+    updates the names on the rest and opens the new ones."""
 
     def test_first_reload_is_full_rebuild(self, tmp_path):
         server = _make_server(tmp_path, netbios_name="HOST", workgroup="WG")
@@ -189,7 +191,8 @@ class TestReloadDispatch:
         # without raising.
         assert server._subnets == []
 
-    def test_interface_change_forces_full_rebuild(self, tmp_path):
+    def test_interface_change_does_not_rebuild(self, tmp_path, caplog):
+        import logging
         server = _make_server(tmp_path, netbios_name="HOST", workgroup="WG")
         asyncio.run(server._reload())
 
@@ -202,9 +205,13 @@ class TestReloadDispatch:
         )
         server.apply_config(new_cfg)
         # The new token matches no local interface, so it is skipped
-        # and the rebuild sets up no subnet.
-        asyncio.run(server._reload())
+        # and no subnet is set up.
+        with caplog.at_level(logging.INFO):
+            asyncio.run(server._reload())
         assert server._subnets == []
+        assert not any(
+            "full rebuild" in r.message.lower() for r in caplog.records
+        )
 
     def test_no_config_change_is_noop(self, tmp_path, caplog):
         import logging
@@ -242,7 +249,8 @@ class TestReloadDispatch:
         is served from the first reload after it has one, although
         ``interfaces`` did not change (as nmbd's ``reload_interfaces``
         does).  Without the privilege to bind port 137 the new
-        subnet's transport stays closed, but the rebuild still runs."""
+        subnet's transport stays closed, but the subnet is still
+        opened."""
         import logging
         server = _make_server(
             tmp_path, netbios_name="HOST", workgroup="WG",
@@ -262,9 +270,9 @@ class TestReloadDispatch:
         with caplog.at_level(logging.INFO):
             resolved = asyncio.run(scenario())
         assert resolved == resolve_subnets(["127.0.0.1"])
-        assert any(
-            "full rebuild" in r.message.lower() for r in caplog.records
-        )
+        messages = [r.message.lower() for r in caplog.records]
+        assert any("subnets changed on lo" in m for m in messages)
+        assert not any("full rebuild" in m for m in messages)
 
     def test_server_string_change_takes_live_update_path(
         self, tmp_path, caplog,

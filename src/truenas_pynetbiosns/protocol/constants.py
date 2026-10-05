@@ -171,33 +171,36 @@ DNS_MAX_LABEL_LENGTH = 63
 # Timing constants (RFC 1002 s6 — DEFINED CONSTANTS)
 # ---------------------------------------------------------------------------
 
-# Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT).
-# The count is of transmissions: "Transmission of the request is
-# attempted BCAST_REQ_RETRY_COUNT times" (RFC 1001 s15.2.1).
-# nmbd instead resends a broadcast request 3 times after the first, one
-# time(NULL) second apart (``make_response_record`` in
-# source3/nmbd/nmbd_responserecordsdb.c).
-REGISTRATION_RETRY_COUNT = 3
-REGISTRATION_RETRY_INTERVAL = 0.250   # 250ms between retries
+# Name registration, timed as Samba nmbd times a broadcast one.
+# ``make_response_record`` (source3/nmbd/nmbd_responserecordsdb.c)
+# resends the request 3 times after the first, 1 s apart for a
+# broadcast, and ``register_name_timeout_response``
+# (nmbd_nameregister.c) takes the name once the interval after the last
+# resend passes without a negative response: "Not receiving a message
+# is success for broadcast registration".  Four transmissions, 4 s.
+# nmbd counts the interval in whole seconds of time(NULL), so its first
+# resend can follow the request at once; ours keeps a steady interval.
+# This departs from RFC 1002 s6, whose BCAST_REQ_RETRY_COUNT is 3
+# transmissions and BCAST_REQ_RETRY_TIMEOUT 250 ms.
+REGISTRATION_RETRY_COUNT = 3          # resends after the first request
+REGISTRATION_RETRY_INTERVAL = 1.0     # seconds between transmissions
 
 # A datagram seen again within this window is taken for the second
 # socket's copy of one delivery.  Retransmitted requests reuse their
-# NAME_TRN_ID; RFC 1002 spaces them BCAST_REQ_RETRY_TIMEOUT (250 ms)
-# apart, outside the window, but nmbd's first resend can fall inside
-# it (see ``PacketDedup``).
+# NAME_TRN_ID; ours are REGISTRATION_RETRY_INTERVAL apart, outside the
+# window, but nmbd's first resend can fall inside it (see
+# ``PacketDedup``).
 DUPLICATE_PACKET_WINDOW = 0.100
-
-# Name refresh (RFC 1002 s6)
-REFRESH_INTERVAL = 900                # 15 minutes (Samba default)
-MAX_REFRESH_TIME = 3600               # 1 hour max TTL
 
 # Name release
 RELEASE_RETRY_COUNT = 1               # Single release packet
 
-# Host announcements (port 138, MS-BRWS s3.2.6)
-ANNOUNCE_INTERVAL_INITIAL = 60        # 1 minute
+# Host announcements (port 138), paced as Samba nmbd's
+# ``announce_my_server_names`` paces them: the first at once, then each
+# interval a minute longer than the one before, up to
+# CHECK_TIME_MAX_HOST_ANNCE (12) minutes.
+ANNOUNCE_INTERVAL_STEP = 60           # seconds added per announcement
 ANNOUNCE_INTERVAL_MAX = 720           # 12 minutes
-ANNOUNCE_COUNT_STARTUP = 3            # Send 3 at startup
 
 # Browser elections
 ELECTION_DELAY = 0.100                # 100ms before responding

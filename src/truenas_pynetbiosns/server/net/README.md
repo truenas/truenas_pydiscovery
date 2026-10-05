@@ -13,7 +13,8 @@ Network layer: broadcast UDP sockets and subnet resolution.
   is skipped with a warning, as Samba's ``interpret_interface``
   skips it; the server resolves the tokens again whenever the
   system's interfaces or addresses change and on every reload, and
-  rebuilds the subnets of the interfaces whose resolution changed.
+  sets up the subnets that appeared and closes those that vanished,
+  leaving the rest alone, as nmbd's ``reload_interfaces`` does.
   IPv4 only; IPv6 isn't defined for NetBIOS over TCP/IP
   (RFC 1001/1002).
 - `transport.py` — `NBNSTransport`: per-interface asyncio

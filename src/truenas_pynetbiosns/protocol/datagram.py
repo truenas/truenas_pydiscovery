@@ -94,20 +94,19 @@ def build_mailslot_datagram(
     mailslot write of *data* from ``source_name<source_type>`` to
     ``dest_name<dest_type>``.
 
-    MSG_TYPE is DIRECT_GROUP whatever the destination, as Samba nmbd's
-    ``send_announcement`` sends every browse announcement
-    (``send_mailslot`` with *unique* false) to the subnet broadcast
-    address, the HostAnnouncement to the unique name
-    ``<workgroup>[0x1D]`` (MS-BRWS §2.1.1.1) included.  This departs
-    from MS-MAIL §3.1.4.1, whose product note <13> reads "For unique
-    names, MSG_TYPE is 0x10 (DIRECT_UNIQUE)", and from RFC 1001 §17.2,
-    under which a datagram for a unique name "is unicast to the sole
-    owner of the name".  The same section has a node that does not
-    hold the destination name discard a group-name datagram quietly
-    but answer a unique-name one with a DATAGRAM ERROR, so broadcasting
-    a DIRECT_UNIQUE datagram instead would invite an error from every
-    other node on the subnet.  nmbd's ``process_dgram`` accepts either
-    type.
+    MSG_TYPE is DIRECT_GROUP because the datagram is broadcast: Samba
+    nmbd's ``send_announcement`` sends every browse announcement with
+    ``send_mailslot`` *unique* false to the subnet broadcast address,
+    the HostAnnouncement to the unique name ``<workgroup>[0x1D]``
+    (MS-BRWS §2.1.1.1) included, and nmbd uses DIRECT_UNIQUE only for
+    datagrams it unicasts to one host (``send_browser_reset``,
+    ``browse_sync_remote``).  RFC 1002 §5.3.1 likewise broadcasts only
+    datagrams for group names.  This departs from MS-MAIL §3.1.4.1,
+    whose product note <13> reads "For unique names, MSG_TYPE is 0x10
+    (DIRECT_UNIQUE)", and from RFC 1001 §17.2, under which a datagram
+    for a unique name "is unicast to the sole owner of the name".
+    nmbd's ``process_dgram`` accepts either type and drops a datagram
+    for a name it does not hold without a DATAGRAM ERROR.
 
     The datagram is unfragmented (FIRST set, PACKET_OFFSET 0) and comes
     from a B node: every name this daemon holds is a B-node broadcast

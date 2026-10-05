@@ -18,12 +18,11 @@ import asyncio
 import logging
 import struct
 from ipaddress import IPv4Address
-from typing import Callable
+from typing import Callable, Iterator
 
 from truenas_pynetbiosns.protocol.constants import (
-    ANNOUNCE_COUNT_STARTUP,
-    ANNOUNCE_INTERVAL_INITIAL,
     ANNOUNCE_INTERVAL_MAX,
+    ANNOUNCE_INTERVAL_STEP,
     BROWSE_ANNOUNCE_PERIODICITY_DEFAULT_MS,
     BROWSE_COMMENT_MAX,
     BROWSE_ELECTION_CRITERIA_DEFAULT,
@@ -206,6 +205,20 @@ def build_host_announcement(
     )
 
 
+def announce_intervals() -> Iterator[int]:
+    """The interval, in seconds, from each HostAnnouncement to the next.
+
+    Paced as Samba nmbd's ``announce_my_server_names`` paces them: each
+    announcement adds ANNOUNCE_INTERVAL_STEP (a minute) to the interval,
+    up to ANNOUNCE_INTERVAL_MAX (``CHECK_TIME_MAX_HOST_ANNCE``, 12
+    minutes), and carries it as its Periodicity, the "Time until next
+    announce" of ``send_host_announcement``."""
+    interval = 0
+    while True:
+        interval = min(interval + ANNOUNCE_INTERVAL_STEP, ANNOUNCE_INTERVAL_MAX)
+        yield interval
+
+
 class BrowseAnnouncer:
     """Sends periodic host announcements on port 138.
 
@@ -245,7 +258,7 @@ class BrowseAnnouncer:
         """Update the advertised hostname for future announcements.
 
         The next ``_send_announcement`` iteration picks up the new
-        value; the ongoing sleep backoff is not disturbed.  Used by
+        value; the current interval is not disturbed.  Used by
         the SIGHUP live-update path so a NetBIOS name change doesn't
         need the whole announcer cancelled + recreated."""
         self._hostname = hostname
@@ -262,29 +275,22 @@ class BrowseAnnouncer:
         See ``set_hostname`` — same cadence preservation semantics."""
         self._server_string = server_string
 
+    def announce_removed(self) -> None:
+        """Announce the server as gone: a HostAnnouncement with server
+        type 0 and Periodicity 0, as Samba nmbd's
+        ``announce_my_servers_removed`` sends at shutdown ("Announce
+        all server entries as 0 time-to-live, 0 type")."""
+        self._send_announcement(ServerType(0), 0)
+
     async def _loop(self) -> None:
-        """Startup burst then exponential backoff (MS-BRWS s3.2.6)."""
+        """Announce at once, then after each of ``announce_intervals``."""
         server_type = ServerType.WORKSTATION | ServerType.SERVER
-
-        delay = ANNOUNCE_INTERVAL_INITIAL
-
-        # Initial burst
-        for _ in range(ANNOUNCE_COUNT_STARTUP):
-            self._send_announcement(server_type, int(delay))
+        for interval in announce_intervals():
+            self._send_announcement(server_type, interval)
             try:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 return
-            delay = min(delay * 2, ANNOUNCE_INTERVAL_MAX)
-
-        # Steady state
-        while True:
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                return
-            self._send_announcement(server_type, int(delay))
-            delay = min(delay * 2, ANNOUNCE_INTERVAL_MAX)
 
     def _send_announcement(
         self, server_type: ServerType, interval_s: int,

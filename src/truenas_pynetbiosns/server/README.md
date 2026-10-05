@@ -42,11 +42,13 @@ On startup, for each configured name (primary + aliases), the daemon registers:
 - `HOSTNAME<0x20>` — file server service (unique)
 - `WORKGROUP<0x00>` — workgroup name (group)
 
-Registration uses B-node broadcast: 3 packets at 250ms intervals on port 137. If no negative response is received, the name is considered registered.
+Registration uses B-node broadcast: one registration request, sent on port 137 and resent 3 times, each transmission followed by a 1 s wait, as Samba nmbd times a broadcast registration (RFC 1002 §6 has 3 transmissions 250 ms apart). The first negative response carrying the request's NAME_TRN_ID ends the claim; if none has arrived by the end of the last wait, the name is considered registered.
+
+Every name on every subnet is claimed at the same time, each with its own request, as Samba nmbd queues one registration per name (`register_my_workgroup_one_subnet`). Registering all names therefore takes one claim's 4 s however many names and subnets there are. A name listed more than once is claimed once.
 
 ## Subpackages
 
-- [core/](core/README.md) — name table, registration, defense, refresh, release
+- [core/](core/README.md) — name table, registration, defense, release
 - [net/](net/README.md) — broadcast UDP sockets, interface resolution
 - [query/](query/README.md) — name query and node status response
 - [browse/](browse/README.md) — host announcements

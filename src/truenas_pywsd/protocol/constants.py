@@ -51,7 +51,6 @@ UDP_UPPER_DELAY = 0.500     # 500ms max backoff
 # ---------------------------------------------------------------------------
 
 PROBE_TIMEOUT = 4.0
-MAX_STARTUP_PROBE_DELAY = 3.0
 
 # HTTP read deadline for the metadata exchange endpoint (port 5357).
 # RFC 9110 / RFC 9112 don't mandate a specific timeout; 10 seconds is

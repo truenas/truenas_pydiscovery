@@ -171,21 +171,36 @@ DNS_MAX_LABEL_LENGTH = 63
 # Timing constants (RFC 1002 s6 — DEFINED CONSTANTS)
 # ---------------------------------------------------------------------------
 
-# Name registration (RFC 1002 s6: BCAST_REQ_RETRY_COUNT, BCAST_REQ_RETRY_TIMEOUT)
-REGISTRATION_RETRY_COUNT = 3
-REGISTRATION_RETRY_INTERVAL = 0.250   # 250ms between retries
+# Name registration, timed as Samba nmbd times a broadcast one.
+# ``make_response_record`` (source3/nmbd/nmbd_responserecordsdb.c)
+# resends the request 3 times after the first, 1 s apart for a
+# broadcast, and ``register_name_timeout_response``
+# (nmbd_nameregister.c) takes the name once the interval after the last
+# resend passes without a negative response: "Not receiving a message
+# is success for broadcast registration".  Four transmissions, 4 s.
+# nmbd counts the interval in whole seconds of time(NULL), so its first
+# resend can follow the request at once; ours keeps a steady interval.
+# This departs from RFC 1002 s6, whose BCAST_REQ_RETRY_COUNT is 3
+# transmissions and BCAST_REQ_RETRY_TIMEOUT 250 ms.
+REGISTRATION_RETRY_COUNT = 3          # resends after the first request
+REGISTRATION_RETRY_INTERVAL = 1.0     # seconds between transmissions
 
-# Name refresh (RFC 1002 s6)
-REFRESH_INTERVAL = 900                # 15 minutes (Samba default)
-MAX_REFRESH_TIME = 3600               # 1 hour max TTL
+# A datagram seen again within this window is taken for the second
+# socket's copy of one delivery.  Retransmitted requests reuse their
+# NAME_TRN_ID; ours are REGISTRATION_RETRY_INTERVAL apart, outside the
+# window, but nmbd's first resend can fall inside it (see
+# ``PacketDedup``).
+DUPLICATE_PACKET_WINDOW = 0.100
 
 # Name release
 RELEASE_RETRY_COUNT = 1               # Single release packet
 
-# Host announcements (port 138, MS-BRWS s3.2.6)
-ANNOUNCE_INTERVAL_INITIAL = 60        # 1 minute
+# Host announcements (port 138), paced as Samba nmbd's
+# ``announce_my_server_names`` paces them: the first at once, then each
+# interval a minute longer than the one before, up to
+# CHECK_TIME_MAX_HOST_ANNCE (12) minutes.
+ANNOUNCE_INTERVAL_STEP = 60           # seconds added per announcement
 ANNOUNCE_INTERVAL_MAX = 720           # 12 minutes
-ANNOUNCE_COUNT_STARTUP = 3            # Send 3 at startup
 
 # Browser elections
 ELECTION_DELAY = 0.100                # 100ms before responding
@@ -252,6 +267,45 @@ class BrowseOpcode(IntEnum):
     DOMAIN_ANNOUNCEMENT = 0x0C
     MASTER_ANNOUNCEMENT = 0x0D
     LOCAL_MASTER_ANNOUNCEMENT = 0x0F
+
+
+# ---------------------------------------------------------------------------
+# NetBIOS datagram service (RFC 1002 s4.4) and mailslot writes (MS-MAIL)
+# ---------------------------------------------------------------------------
+
+
+class DatagramType(IntEnum):
+    """MSG_TYPE of a NetBIOS datagram (RFC 1002 s4.4.1)."""
+    DIRECT_UNIQUE = 0x10
+    DIRECT_GROUP = 0x11
+    BROADCAST = 0x12
+    ERROR = 0x13
+    QUERY_REQUEST = 0x14
+    POSITIVE_QUERY_RESPONSE = 0x15
+    NEGATIVE_QUERY_RESPONSE = 0x16
+
+
+class DatagramFlag(IntFlag):
+    """FLAGS of a NetBIOS datagram (RFC 1002 s4.4.1).
+
+    The source end-node type (SNT) sits above these bits and is 0 for a
+    B node, so an unfragmented datagram from a B node carries FIRST only.
+    """
+    MORE = 0x01
+    FIRST = 0x02
+
+
+# The SMB command a mailslot write travels in (MS-MAIL 2.2.1).
+SMB_COM_TRANSACTION = 0x25
+
+# Mailslot write setup words (MS-MAIL 2.2.1).  Class 2 is the unreliable
+# class, the only one that may be broadcast.  Priority 1 is what Samba
+# nmbd sends (``send_mailslot``); Windows ignores it on receipt.
+MAILSLOT_OPCODE_WRITE = 0x0001
+MAILSLOT_PRIORITY = 1
+MAILSLOT_CLASS_UNRELIABLE = 0x0002
+
+MAILSLOT_BROWSE = "\\MAILSLOT\\BROWSE"
 
 
 # ---------------------------------------------------------------------------

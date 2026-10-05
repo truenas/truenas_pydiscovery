@@ -173,7 +173,8 @@ class WSDServer(ConfigDaemon):
         previous ``apply_config``:
 
         * **full rebuild** — interfaces, IPv4/IPv6 toggle, or
-          ``hostname`` changed, or this is the first SIGHUP.
+          ``hostname`` changed, or no configuration has been applied
+          yet (``_prev_config is None``).
           Hostname change flips ``_endpoint_uuid``, which WSD
           clients treat as a new device — Bye+Hello is the right
           wire behaviour.
@@ -299,6 +300,71 @@ class WSDServer(ConfigDaemon):
             wg_or_domain, is_domain, self._metadata_version,
             len(self._interfaces),
         )
+
+    async def _reconcile_interfaces(self) -> None:
+        """Bring the interfaces in line with what the system has now.
+
+        Called once interface and address changes have settled (the
+        composite's ``InterfaceMonitor``).  An interface that appeared,
+        or whose addresses changed, is set up afresh (its multicast
+        socket, metadata listeners and XAddrs all come from its
+        addresses) and sends a Hello: WS-Discovery 1.1 §4.1.1 has a
+        Target Service send one when "it becomes available through one
+        or more additional transport addresses".  An interface that
+        disappeared, or the old state of one that changed, is torn down
+        without a Bye, as wsdd (``handle_deleted_address``) and
+        wsdd-native (``ServerManager::removeAddress``) drop a vanished
+        address: the address a Bye would come from may be gone.
+        Interfaces whose addresses did not change are left alone."""
+        if not self._config.server.interfaces:
+            return
+        loop = asyncio.get_running_loop()
+        current: dict[int, InterfaceInfo] = {}
+        for name in self._config.server.interfaces:
+            iface = await loop.run_in_executor(
+                None, resolve_interface, name,
+            )
+            if iface is not None:
+                current[iface.index] = iface
+        await self._apply_interfaces(current, loop)
+
+    async def _apply_interfaces(
+        self,
+        current: dict[int, InterfaceInfo],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """``_reconcile_interfaces`` for the interfaces *current*
+        (index to what it has now)."""
+        stale = [
+            index for index, ifstate in self._interfaces.items()
+            if index not in current
+            or not _same_addresses(current[index], ifstate.iface)
+        ]
+        fresh = [
+            index for index in current
+            if index not in self._interfaces or index in stale
+        ]
+        if not stale and not fresh:
+            return
+        logger.info(
+            "Interfaces changed: setting up %s, dropping %s",
+            [current[i].name for i in fresh],
+            [self._interfaces[i].iface.name for i in stale],
+        )
+        for index in stale:
+            await self._interfaces.pop(index).stop()
+        for index in fresh:
+            await self._setup_interface(current[index], loop)
+            ifstate = self._interfaces.get(index)
+            if ifstate is not None and ifstate.transport:
+                await send_hello(
+                    ifstate.transport.send_multicast,
+                    self._endpoint_uuid,
+                    self._build_xaddrs(ifstate.iface),
+                    app_sequence=self._instance_id,
+                    message_number=self._next_msg_number(),
+                    metadata_version=self._metadata_version,
+                )
 
     def _write_status(self) -> None:
         ifaces = {}
@@ -503,3 +569,10 @@ class WSDServer(ConfigDaemon):
             for a in iface.addrs_v6 if a.ip.is_link_local
         ]
         return " ".join(urls)
+
+
+def _same_addresses(a: InterfaceInfo, b: InterfaceInfo) -> bool:
+    return (
+        set(a.addrs_v4) == set(b.addrs_v4)
+        and set(a.addrs_v6) == set(b.addrs_v6)
+    )

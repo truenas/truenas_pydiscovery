@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-from typing import Callable
+from ipaddress import IPv4Address
+from typing import Callable, Iterator
 
 from truenas_pynetbiosns.protocol.constants import (
-    ANNOUNCE_COUNT_STARTUP,
-    ANNOUNCE_INTERVAL_INITIAL,
     ANNOUNCE_INTERVAL_MAX,
+    ANNOUNCE_INTERVAL_STEP,
     BROWSE_ANNOUNCE_PERIODICITY_DEFAULT_MS,
     BROWSE_COMMENT_MAX,
     BROWSE_ELECTION_CRITERIA_DEFAULT,
@@ -32,9 +32,12 @@ from truenas_pynetbiosns.protocol.constants import (
     BROWSER_VERSION_MAJOR,
     BROWSER_VERSION_MINOR,
     BrowseOpcode,
+    MAILSLOT_BROWSE,
     NETBIOS_NAME_LENGTH,
+    NameType,
     ServerType,
 )
+from truenas_pynetbiosns.protocol.datagram import build_mailslot_datagram
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +205,28 @@ def build_host_announcement(
     )
 
 
+def announce_intervals() -> Iterator[int]:
+    """The interval, in seconds, from each HostAnnouncement to the next.
+
+    Paced as Samba nmbd's ``announce_my_server_names`` paces them: each
+    announcement adds ANNOUNCE_INTERVAL_STEP (a minute) to the interval,
+    up to ANNOUNCE_INTERVAL_MAX (``CHECK_TIME_MAX_HOST_ANNCE``, 12
+    minutes), and carries it as its Periodicity, the "Time until next
+    announce" of ``send_host_announcement``."""
+    interval = 0
+    while True:
+        interval = min(interval + ANNOUNCE_INTERVAL_STEP, ANNOUNCE_INTERVAL_MAX)
+        yield interval
+
+
 class BrowseAnnouncer:
-    """Sends periodic host announcements on port 138."""
+    """Sends periodic host announcements on port 138.
+
+    Each announcement goes to the local master browser name
+    ``<workgroup>[0x1D]`` as a mailslot datagram
+    (``build_mailslot_datagram``) whose SOURCE_IP is *source_ip*, the
+    address of the subnet it is broadcast on.
+    """
 
     def __init__(
         self,
@@ -211,11 +234,14 @@ class BrowseAnnouncer:
         hostname: str,
         workgroup: str,
         server_string: str = "",
+        *,
+        source_ip: IPv4Address,
     ) -> None:
         self._send = send_fn
         self._hostname = hostname
         self._workgroup = workgroup
         self._server_string = server_string
+        self._source_ip = source_ip
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -232,7 +258,7 @@ class BrowseAnnouncer:
         """Update the advertised hostname for future announcements.
 
         The next ``_send_announcement`` iteration picks up the new
-        value; the ongoing sleep backoff is not disturbed.  Used by
+        value; the current interval is not disturbed.  Used by
         the SIGHUP live-update path so a NetBIOS name change doesn't
         need the whole announcer cancelled + recreated."""
         self._hostname = hostname
@@ -249,29 +275,22 @@ class BrowseAnnouncer:
         See ``set_hostname`` — same cadence preservation semantics."""
         self._server_string = server_string
 
+    def announce_removed(self) -> None:
+        """Announce the server as gone: a HostAnnouncement with server
+        type 0 and Periodicity 0, as Samba nmbd's
+        ``announce_my_servers_removed`` sends at shutdown ("Announce
+        all server entries as 0 time-to-live, 0 type")."""
+        self._send_announcement(ServerType(0), 0)
+
     async def _loop(self) -> None:
-        """Startup burst then exponential backoff (MS-BRWS s3.2.6)."""
+        """Announce at once, then after each of ``announce_intervals``."""
         server_type = ServerType.WORKSTATION | ServerType.SERVER
-
-        delay = ANNOUNCE_INTERVAL_INITIAL
-
-        # Initial burst
-        for _ in range(ANNOUNCE_COUNT_STARTUP):
-            self._send_announcement(server_type, int(delay))
+        for interval in announce_intervals():
+            self._send_announcement(server_type, interval)
             try:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 return
-            delay = min(delay * 2, ANNOUNCE_INTERVAL_MAX)
-
-        # Steady state
-        while True:
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                return
-            self._send_announcement(server_type, int(delay))
-            delay = min(delay * 2, ANNOUNCE_INTERVAL_MAX)
 
     def _send_announcement(
         self, server_type: ServerType, interval_s: int,
@@ -284,5 +303,19 @@ class BrowseAnnouncer:
             server_type=server_type,
             announce_interval_ms=interval_s * 1000,
         )
-        self._send(payload)
+        # From <hostname>[0x00] to <workgroup>[0x1D] on \MAILSLOT\BROWSE:
+        # the name and mailslot MS-BRWS §3.2.5.2 gives for the mailslot
+        # write, and what Samba nmbd's ``send_host_announcement`` sends.
+        # §2.2.1 instead says a server SHOULD use \MAILSLOT\LANMAN, which
+        # Windows does (product note <9>); §2.1 has a browser server
+        # accept either mailslot.
+        self._send(build_mailslot_datagram(
+            payload,
+            mailslot=MAILSLOT_BROWSE,
+            source_name=self._hostname,
+            source_type=NameType.WORKSTATION,
+            dest_name=self._workgroup,
+            dest_type=NameType.LOCAL_MASTER,
+            source_ip=self._source_ip,
+        ))
         logger.debug("Host announcement sent for %s", self._hostname)

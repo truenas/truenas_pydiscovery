@@ -7,7 +7,6 @@ from textwrap import dedent
 
 from truenas_pymdns.server.config import (
     DaemonConfig,
-    ReflectorConfig,
     ServerConfig,
     ServiceConfig,
     generate_daemon_config,
@@ -29,11 +28,9 @@ class TestLoadDaemonConfig:
         assert cfg.server.domain_name == "local"
         assert cfg.server.use_ipv4 is True
         assert cfg.server.use_ipv6 is True
-        assert cfg.server.cache_entries_max == 4096
         assert cfg.server.interfaces == []
         # Avahi's option, but our default is exclusive (yes).
         assert cfg.server.disallow_other_stacks is True
-        assert cfg.reflector.enable_reflector is False
 
     def test_full_config(self, tmp_path):
         conf = tmp_path / "test.conf"
@@ -45,12 +42,6 @@ class TestLoadDaemonConfig:
             use-ipv4 = yes
             use-ipv6 = no
             disallow-other-stacks = no
-            cache-entries-max = 2048
-            ratelimit-interval-usec = 500000
-            ratelimit-burst = 500
-
-            [reflector]
-            enable-reflector = no
 
             [paths]
             service-dir = /custom/services
@@ -61,9 +52,30 @@ class TestLoadDaemonConfig:
         assert cfg.server.use_ipv6 is False
         assert cfg.server.interfaces == ["eth0", "eth1"]
         assert cfg.server.disallow_other_stacks is False
-        assert cfg.server.cache_entries_max == 2048
         assert cfg.service_dir == Path("/custom/services")
         assert cfg.rundir == Path("/custom/run")
+
+    def test_removed_options_are_ignored(self, tmp_path):
+        """A file still carrying the removed avahi-style options loads,
+        and the options it names don't exist any more."""
+        conf = tmp_path / "old.conf"
+        conf.write_text(dedent("""\
+            [server]
+            host-name = truenas
+            cache-entries-max = 2048
+            ratelimit-interval-usec = 500000
+            ratelimit-burst = 500
+
+            [reflector]
+            enable-reflector = yes
+        """))
+        cfg = load_daemon_config(conf)
+        assert cfg.server.host_name == "truenas"
+        for name in (
+            "cache_entries_max", "ratelimit_interval_usec", "ratelimit_burst",
+        ):
+            assert not hasattr(cfg.server, name)
+        assert not hasattr(cfg, "reflector")
 
     def test_partial_config(self, tmp_path):
         conf = tmp_path / "partial.conf"
@@ -89,9 +101,7 @@ class TestGenerateDaemonConfig:
                 interfaces=["eth0", "eth1"],
                 use_ipv6=False,
                 disallow_other_stacks=False,
-                cache_entries_max=2048,
             ),
-            reflector=ReflectorConfig(enable_reflector=True),
         )
         data = generate_daemon_config(original)
         assert isinstance(data, bytes)
@@ -104,8 +114,6 @@ class TestGenerateDaemonConfig:
         assert loaded.server.interfaces == ["eth0", "eth1"]
         assert loaded.server.use_ipv6 is False
         assert loaded.server.disallow_other_stacks is False
-        assert loaded.server.cache_entries_max == 2048
-        assert loaded.reflector.enable_reflector is True
 
     def test_defaults_round_trip(self, tmp_path):
         data = generate_daemon_config(DaemonConfig())

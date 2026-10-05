@@ -2,11 +2,51 @@ name: Build and Test
 
 on:
   pull_request:
-    branches: [ master ]
+    branches: [ master, 'stable/**' ]
   push:
-    branches: [ master ]
+    branches: [ master, 'stable/**' ]
 
 jobs:
+
+  pre_build:
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      train: ${{ steps.train.outputs.train }}
+      publish: ${{ steps.train.outputs.publish }}
+
+    steps:
+      - name: Check out train config
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Map branch to TrueNAS train
+        id: train
+        run: |
+          # Look up on every event so PRs validate trains.json.  Only
+          # branch pushes publish; a tag can share a branch's name.
+          rc=0
+          entry=$(.github/workflows/scripts/resolve-train.py branch "$GITHUB_REF_NAME") || rc=$?
+          case $rc in
+            0) ;;
+            3) entry="" ;;    # not listed
+            *) exit "$rc" ;;  # invalid config
+          esac
+          train=""
+          publish=false
+          if [ -n "$entry" ] && [ "$GITHUB_EVENT_NAME" = push ] &&
+              [ "$GITHUB_REF_TYPE" = branch ]; then
+            echo "Publishing branch: $entry"
+            train=$(jq -r '.train' <<< "$entry")
+            publish=true
+          fi
+          {
+            echo "train=$train"
+            echo "publish=$publish"
+          } | tee -a "$GITHUB_OUTPUT"
+
   build-test:
     # Debian Trixie matches our packaging target (debian/changelog
     # declares ``unstable``) and ships Python ≥ 3.11 per our
@@ -72,9 +112,170 @@ jobs:
       # Pytest's default ``sys.path`` doesn't include ``src/`` (no
       # ``pythonpath`` entry in ``pyproject.toml``), so imports of
       # ``truenas_pymdns`` / ``truenas_pynetbiosns`` / ``truenas_pywsd``
-      # resolve to the just-installed system copy.  All tests run —
-      # unit, component, and integration (the dummy interface above
-      # satisfies the integration fixture's UP+BROADCAST+MULTICAST
-      # requirement).
+      # resolve to the just-installed system copy.  Unit, component and
+      # integration tests run (the dummy interface above satisfies the
+      # integration fixture's UP+BROADCAST+MULTICAST requirement); the
+      # functional tests need systemd and run in the qemu-test job.
       - name: pytest
         run: python3 -m pytest tests/ -v
+
+      - name: Collect Debian package
+        run: |
+          mkdir -p dist
+          cp ../python3-truenas-pydiscovery_*.deb dist/
+
+      - name: Export Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ github.sha }}
+          path: dist/
+
+  qemu-test:
+    # The installed package under systemd, in a Debian Trixie VM: the
+    # functional tests (tests/functional/) start, reload and stop the
+    # truenas-discoveryd unit and query it from network namespaces.
+    name: Debian Trixie QEMU Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup QEMU
+        timeout-minutes: 10
+        run: bash .github/workflows/scripts/qemu-1-setup.sh
+
+      - name: Start Debian Trixie VM
+        timeout-minutes: 10
+        run: bash .github/workflows/scripts/qemu-2-start.sh
+
+      - name: Build and install truenas_pydiscovery
+        timeout-minutes: 30
+        run: bash .github/workflows/scripts/qemu-3-build.sh
+
+      - name: Run tests
+        timeout-minutes: 30
+        run: bash .github/workflows/scripts/qemu-4-test.sh
+
+      - name: Collect logs
+        if: always()
+        timeout-minutes: 5
+        run: bash .github/workflows/scripts/qemu-5-collect-logs.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-logs-debian-trixie
+          path: /tmp/qemu-logs.tar.gz
+          if-no-files-found: ignore
+
+      - name: Test Summary
+        if: always()
+        run: bash .github/workflows/scripts/qemu-6-summary.sh
+
+  # On every merge to a branch listed in .github/trains.json, republish
+  # the deb built by build-test as the asset of a per-train rolling
+  # prerelease (<train>-nightly), once both test jobs have passed.
+  # Release assets (unlike Actions artifacts) never expire and are
+  # downloadable anonymously at stable URLs:
+  #   https://github.com/<owner>/<repo>/releases/download/master-nightly/<file>
+  # Consumers should fetch manifest.json first to learn the current
+  # package version and file names, then verify downloads against
+  # SHA256SUMS.
+  publish:
+
+    needs: [pre_build, build-test, qemu-test]
+    if: ${{ needs.pre_build.outputs.publish == 'true' }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      actions: read
+
+    concurrency:
+      group: publish-nightly-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Download Debian package
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ github.sha }}
+          path: debs
+
+      - name: Assemble release assets
+        run: |
+          mkdir release-assets
+          cp debs/*.deb release-assets/
+          deb=$(ls release-assets/python3-truenas-pydiscovery_*.deb | head -n1)
+          version=$(dpkg-deb -f "$deb" Version)
+          if [ -z "$version" ]; then
+            echo "ERROR: could not read the package version from $deb"
+            exit 1
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Generate checksums and manifest
+        run: |
+          cd release-assets
+          sha256sum *.deb > SHA256SUMS
+          ls *.deb | jq -R . | jq -s \
+            --arg branch "$GITHUB_REF_NAME" \
+            --arg commit "$GITHUB_SHA" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg version "$PACKAGE_VERSION" \
+            '{
+              branch: $branch,
+              commit: $commit,
+              date: $date,
+              run_url: $run_url,
+              version: $version,
+              debs: .
+            }' > manifest.json
+          cat manifest.json
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRAIN: ${{ needs.pre_build.outputs.train }}
+        run: |
+          # If the branch has already moved past this commit, let the run
+          # building the new tip publish instead - the release must never
+          # go back to an older package.
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "$GITHUB_REF_NAME is now at $tip, not publishing $GITHUB_SHA"
+            exit 0
+          fi
+
+          if [ -z "$TRAIN" ]; then
+            echo "ERROR: no train resolved for branch $GITHUB_REF_NAME"
+            exit 1
+          fi
+          tag="${TRAIN}-nightly"
+
+          {
+            echo "Rolling build of \`$GITHUB_REF_NAME\` at $GITHUB_SHA."
+            echo
+            echo "- Package version: \`$PACKAGE_VERSION\`"
+            echo "- Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "The tag and all assets are replaced on every merge to"
+            echo "\`$GITHUB_REF_NAME\`. Fetch \`manifest.json\` to see what is"
+            echo "currently published and verify downloads against \`SHA256SUMS\`."
+          } > release-notes.md
+
+          gh release delete "$tag" --cleanup-tag --yes || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" 2>/dev/null || true
+          gh release create "$tag" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "TrueNAS $TRAIN truenas_pydiscovery (nightly)" \
+            --notes-file release-notes.md \
+            release-assets/*.deb \
+            release-assets/SHA256SUMS \
+            release-assets/manifest.json

@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class ServiceRegistry:
     """Stores all records this server is authoritative for.
 
-    Distinct from the cache (which stores records learned from the network).
+    This is the daemon's only record store: it keeps no cache of
+    records learned from the network.
     Lookup returns OwnedRecord wrappers so the Responder can read/write
     per-record scheduling state (last_multicast, last_peer_answer) in
     place, instead of keeping a side dict that would need pruning.
@@ -22,8 +23,12 @@ class ServiceRegistry:
         self._groups: list[EntryGroup] = []
 
     def add_group(self, group: EntryGroup) -> None:
-        """Register an entry group so its records become authoritative."""
-        self._groups.append(group)
+        """Register an entry group so its records become authoritative.
+
+        Registering a group that is already registered changes nothing:
+        its records are answered once."""
+        if group not in self._groups:
+            self._groups.append(group)
 
     def remove_group(self, group: EntryGroup) -> None:
         """Unregister an entry group; no-op if not present."""

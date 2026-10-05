@@ -1,8 +1,8 @@
 .TH TRUENAS\-DISCOVERYD.CONF 5 "2026-04-17" "truenas-pydiscovery" "File Formats"
 .SH NAME
-truenas\-pydiscoveryd.conf \- configuration for truenas\-pydiscoveryd(8)
+truenas\-discoveryd.conf \- configuration for truenas\-discoveryd(8)
 .SH SYNOPSIS
-.I /etc/truenas\-pydiscovery/truenas\-pydiscoveryd.conf
+.I /etc/truenas\-discovery/truenas\-discoveryd.conf
 .SH DESCRIPTION
 INI\-format configuration file.
 A shared
@@ -37,7 +37,7 @@ Default workgroup name used by the NetBIOS NS and WSD protocols.
 .TP
 .B rundir
 Base runtime directory (default
-.IR /run/truenas\-pydiscovery ).
+.IR /run/truenas\-discovery ).
 Each protocol's own rundir sits under this as
 .IR mdns ,
 .IR netbiosns ,
@@ -79,17 +79,9 @@ to share the port, which is avahi's own default for its
 identically\-named option.  Takes effect on reload (the sockets
 rebind).
 .TP
-.B cache-entries-max
-Maximum cache records per interface (default
-.BR 4096 ).
-.TP
-.B enable-reflector
-Cross\-interface reflector mode (default
-.BR no ).
-.TP
 .B service-dir
 Directory containing service definition files (default
-.IR /etc/truenas\-pydiscovery/services.d ).
+.IR /etc/truenas\-discovery/services.d ).
 .SH SECTION [netbiosns]
 .TP
 .B enabled
@@ -98,7 +90,8 @@ Directory containing service definition files (default
 .B interfaces
 Override of the shared list.
 The NetBIOS section accepts three token forms in this list,
-resolved at daemon startup against the live network state:
+resolved against the live network state at daemon startup, on every
+reload, and whenever interfaces or addresses change:
 .RS
 .IP \(bu 3
 Interface name (\fBeth0\fR) \(em every local IPv4 address on that
@@ -116,7 +109,21 @@ Each resolved entry is one broadcast domain
 (analogous to Samba\(cq\(cq\&s \fBsubnet_record\fR).
 A single interface with IPv4 addresses in two subnets yields two
 entries; the daemon registers the configured names on every entry.
-Tokens that do not resolve to any local address cause startup to fail.
+A token that matches no local IPv4 address (for example an interface
+that is down or has no IPv4 address) is skipped with a warning, as
+Samba\(cq\(cq\&s \fBinterpret_interface\fR does; the remaining tokens
+are still served.
+The daemon notices on its own when the tokens resolve to different
+entries because an interface gained, lost or changed an IPv4 address
+(see
+.BR truenas\-discoveryd (8)):
+it registers the names on each new entry and closes each entry that is
+gone, leaving the others alone, so an interface skipped at startup is
+served once it has an address.
+A reload that resolves the tokens to different entries, for instance
+after this option changes, does the same.
+Neither releases a name, as Samba's nmbd releases none when it closes a
+subnet.
 .TP
 .B netbios-name
 Primary 15\-char NetBIOS name.
@@ -176,5 +183,5 @@ use-ipv6 = yes
 .fi
 .RE
 .SH SEE ALSO
-.BR truenas\-pydiscoveryd (8),
-.BR truenas\-mdnsd\-service.conf (5)
+.BR truenas\-discoveryd (8),
+.BR truenas\-discoveryd\-service.conf (5)

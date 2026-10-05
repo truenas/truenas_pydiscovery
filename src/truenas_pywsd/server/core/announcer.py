@@ -38,7 +38,13 @@ async def send_hello(
 
     *metadata_version* goes into the ``<wsd:MetadataVersion>`` element;
     WSD 1.1 §4.1 requires clients to re-acquire metadata when the
-    value they see is greater than what they have cached."""
+    value they see is greater than what they have cached.
+
+    The first copy goes out immediately, as christgau/wsdd's
+    ``send_hello`` sends it.  This departs from WS-Discovery 1.1
+    §4.1, under which a Target Service "MUST wait for a timer to
+    elapse before sending the Hello" — a random 0..APP_MAX_DELAY
+    (§3.1.3, default 500 ms)."""
     data = build_hello(
         endpoint_uuid, xaddrs,
         metadata_version=metadata_version,

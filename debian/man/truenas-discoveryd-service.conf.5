@@ -1,18 +1,18 @@
 .TH TRUENAS\-DISCOVERYD\-SERVICE.CONF 5 "2026-04-20" "truenas-pydiscovery" "File Formats"
 .SH NAME
-truenas\-pydiscoveryd\-service.conf \- mDNS service definition file
+truenas\-discoveryd\-service.conf \- mDNS service definition file
 .SH SYNOPSIS
-.I /etc/truenas\-pydiscovery/services.d/*.conf
+.I /etc/truenas\-discovery/services.d/*.conf
 .SH DESCRIPTION
 Each \fB.conf\fP file in the services directory defines one mDNS/DNS\-SD
 service to be advertised by
-.BR truenas\-pydiscoveryd (8).
+.BR truenas\-discoveryd (8).
 The directory path is set by the
 .B service\-dir
 key in the
 .B [mdns]
 section of
-.BR truenas\-pydiscoveryd.conf (5).
+.BR truenas\-discoveryd.conf (5).
 Middleware writes these files; the daemon reads them on startup and
 on SIGHUP reload.
 .PP
@@ -83,5 +83,5 @@ port = 443
 interfaces = eth0
 .fi
 .SH SEE ALSO
-.BR truenas\-pydiscoveryd (8),
-.BR truenas\-pydiscoveryd.conf (5)
+.BR truenas\-discoveryd (8),
+.BR truenas\-discoveryd.conf (5)

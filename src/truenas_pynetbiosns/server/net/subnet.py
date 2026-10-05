@@ -14,7 +14,15 @@ Accepted token forms (mirroring Samba's ``interpret_interface``):
 - CIDR (``192.168.1.0/24``): every local IPv4 address inside this
   network; user-supplied netmask overrides the kernel's for the entry.
 
-Unresolvable tokens raise ``ValueError``.
+A well-formed token that matches no local IPv4 address — an interface
+that is down or has no IPv4 address, an address or network not
+configured here — is skipped with a warning, as Samba's
+``interpret_interface`` skips it (``source3/lib/interface.c``), and the
+remaining tokens still resolve.  ``NBNSServer`` resolves the tokens
+again whenever the system's interfaces or addresses change
+(``_reconcile_interfaces``) and on every reload, so such an interface
+is served once it has an address.  Malformed tokens (empty, bad CIDR)
+raise ``ValueError``.
 
 Broadcast-address limitation: broadcast is derived from the
 address prefix (``IPv4Network.broadcast_address``), which matches
@@ -100,7 +108,8 @@ def resolve_subnets(
     """Expand config tokens to the full list of ``NbnsSubnet`` entries.
 
     *probed* is only for injection in tests; production callers leave it
-    unset so we query the kernel via ioctl.
+    unset so we query the kernel via netlink.  Tokens that match no probed
+    address are skipped with a warning (see the module docstring).
     """
     if probed is None:
         probed = probe_addresses()
@@ -136,7 +145,10 @@ def resolve_subnets(
             assert isinstance(value, str)
             matches = [p for p in probed if p.ifname == value]
             if not matches:
-                raise ValueError(f"interface not found: {value}")
+                logger.warning(
+                    "interfaces: no IPv4 address on %s; skipping", value,
+                )
+                continue
             for p in matches:
                 _add(p)
 
@@ -144,9 +156,11 @@ def resolve_subnets(
             assert isinstance(value, IPv4Address)
             matches = [p for p in probed if p.ip == value]
             if not matches:
-                raise ValueError(
-                    f"no local interface owns address {value}"
+                logger.warning(
+                    "interfaces: no local interface owns %s; skipping",
+                    value,
                 )
+                continue
             for p in matches:
                 _add(p)
 
@@ -154,11 +168,17 @@ def resolve_subnets(
             assert isinstance(value, IPv4Network)
             matches = [p for p in probed if p.ip in value]
             if not matches:
-                raise ValueError(
-                    f"no local interface has an address in {value}"
+                logger.warning(
+                    "interfaces: no local address in %s; skipping", value,
                 )
+                continue
             user_mask = IPv4Address(int(value.netmask))
             for p in matches:
                 _add(p, netmask=user_mask)
 
+    if tokens and not resolved:
+        logger.warning(
+            "interfaces: no configured interface has an IPv4 address; "
+            "NetBIOS name service has no subnet to serve",
+        )
     return resolved

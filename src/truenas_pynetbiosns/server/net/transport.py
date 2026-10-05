@@ -108,8 +108,8 @@ class NBNSTransport:
             )
 
         # Port 138 — Datagram Service (unicast + subnet-bcast).
-        # We open the sockets unconditionally so ``send_dgram_broadcast``
-        # has a bound source address, but register them with the event
+        # We open the sockets unconditionally so ``send_dgram`` has a
+        # bound source address, but register them with the event
         # loop only when a ``dgram_handler`` is provided.  Registering
         # an fd with ``add_reader`` on a socket we never ``recvfrom``
         # pegs the event loop at 100% CPU: level-triggered epoll
@@ -168,6 +168,11 @@ class NBNSTransport:
         """True if the name service unicast socket is open."""
         return self._sock_nmb_unicast is not None
 
+    @property
+    def interface_addr(self) -> str:
+        """The interface address the unicast sockets are bound to."""
+        return self._ifaddr
+
     # -- Send ---------------------------------------------------------------
     #
     # All sends go through the unicast socket — its bound source IP
@@ -203,17 +208,19 @@ class NBNSTransport:
                 "Unicast sendto failed on %s: %s", self._ifname, e,
             )
 
-    def send_dgram_broadcast(self, data: bytes) -> None:
-        """Send raw datagram data to broadcast on port 138."""
+    def send_dgram(self, data: bytes, addr: tuple[str, int]) -> None:
+        """Send a raw NetBIOS datagram from port 138 to *addr*.
+
+        Every subnet on the interface shares this transport, so the
+        caller supplies the destination: a subnet's broadcast address
+        for its browse announcements."""
         if self._sock_dgram_unicast is None:
             return
         try:
-            self._sock_dgram_unicast.sendto(
-                data, (self._bcast, DGRAM_PORT),
-            )
+            self._sock_dgram_unicast.sendto(data, addr)
         except OSError as e:
             logger.debug(
-                "DGRAM broadcast failed on %s: %s", self._ifname, e,
+                "DGRAM sendto failed on %s: %s", self._ifname, e,
             )
 
     # -- Receive callbacks --------------------------------------------------
@@ -224,8 +231,9 @@ class NBNSTransport:
     # transports' bcast sockets receive a clone of each subnet
     # broadcast — Linux delivers broadcasts to every socket matching
     # the destination address regardless of ``SO_REUSEPORT`` (only
-    # unicast is load-balanced).  Each transport correctly processes
-    # its copy; the nmbd state machines are idempotent.
+    # unicast is load-balanced).  ``NBNSServer._handle_message``
+    # dispatches only the first copy (``PacketDedup``), as Samba's
+    # ``is_processed_packet`` does.
 
     def _on_readable_nmb_unicast(self) -> None:
         self._recv_and_dispatch_nmb(self._sock_nmb_unicast)

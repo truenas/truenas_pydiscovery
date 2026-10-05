@@ -396,6 +396,28 @@ def mdns_daemon_factory(candidate_interface, tmp_path_factory):
 # NetBIOS NS daemon fixtures
 # ---------------------------------------------------------------------------
 
+# How long a NetBIOS NS daemon gets to claim its names.  One claim
+# takes 4 s: the request and REGISTRATION_RETRY_COUNT resends, each
+# followed by REGISTRATION_RETRY_INTERVAL, as nmbd times it.
+NBNS_READY_TIMEOUT = 20
+
+
+def _wait_for_netbios_names(iface_addr: str, netbios_name: str) -> None:
+    """Return once the daemon at *iface_addr* lists *netbios_name* in
+    its node status, that is once its claims are complete."""
+    deadline = time.monotonic() + NBNS_READY_TIMEOUT
+    while True:
+        result = run_tool(["nbt-status", iface_addr, "--json"])
+        if result.returncode == 0 and netbios_name in result.stdout:
+            return
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"{netbios_name} not registered after "
+                f"{NBNS_READY_TIMEOUT} s: {result.stderr.strip()}"
+            )
+        time.sleep(0.5)
+
+
 def _start_netbiosns(
     candidate_interface, tmp_path, interfaces_token: str | None,
 ) -> NBNSDaemonInfo:
@@ -419,6 +441,11 @@ def _start_netbiosns(
     proc = _start_daemon([
         "-m", _UNIFIED_MODULE, "-c", str(config_path), "-v",
     ])
+    try:
+        _wait_for_netbios_names(iface_addr, netbios_name)
+    except RuntimeError:
+        _stop_daemon(proc)
+        raise
 
     return NBNSDaemonInfo(
         proc=proc,

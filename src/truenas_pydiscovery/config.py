@@ -126,18 +126,6 @@ def _build_mdns(
             cfg.server.disallow_other_stacks = _parse_bool(
                 s["disallow-other-stacks"],
             )
-        if "cache-entries-max" in s:
-            cfg.server.cache_entries_max = int(s["cache-entries-max"])
-        if "ratelimit-interval-usec" in s:
-            cfg.server.ratelimit_interval_usec = int(
-                s["ratelimit-interval-usec"],
-            )
-        if "ratelimit-burst" in s:
-            cfg.server.ratelimit_burst = int(s["ratelimit-burst"])
-        if "enable-reflector" in s:
-            cfg.reflector.enable_reflector = _parse_bool(
-                s["enable-reflector"],
-            )
         if "service-dir" in s:
             cfg.service_dir = Path(s["service-dir"])
         else:

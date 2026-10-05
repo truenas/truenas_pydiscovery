@@ -40,7 +40,7 @@ src/
 
   truenas_pynetbiosns/          # NetBIOS Name Service + Browser
     protocol/                   # Wire protocol (RFC 1001/1002)
-    server/                     # Registration, defense, refresh, browse announcements
+    server/                     # Registration, defense, browse announcements
     client/                     # CLI tools: lookup, status
 
   truenas_pywsd/                # Web Services Discovery
@@ -51,6 +51,10 @@ src/
   truenas_pydiscovery_utils/    # Shared infrastructure
     daemon.py                   # BaseDaemon: async lifecycle, signal handling
     composite.py                # CompositeDaemon: fan out lifecycle to children
+    interface_monitor.py        # Netlink link/address monitor driving reconciles
+    netlink_addr.py             # Netlink address enumeration
+    interface_tokens.py         # Interface token classification and validation
+    sd_notify.py                # systemd notifications (READY/RELOADING)
     logger.py                   # Non-blocking syslog via QueueHandler/QueueListener
     status.py                   # Atomic JSON status writer
     entry_point.py              # Common CLI boilerplate (-c/-v flags)
@@ -69,8 +73,21 @@ One unified daemon.  `-c CONFIG` for config file, `-v` for
 verbosity (syslog by default, stderr with `-v`).  Signals:
 `SIGHUP` reloads every enabled protocol, `SIGUSR1` writes
 per-protocol status JSONs, `SIGTERM` / `SIGINT` for graceful
-shutdown (each protocol emits its own goodbye / bye / release
-frames before closing sockets).
+shutdown (mDNS sends goodbyes, WS-Discovery a Bye, and NetBIOS NS a
+HostAnnouncement marking the server removed before closing sockets;
+like nmbd, NetBIOS NS releases no names at shutdown).
+
+Interface and address changes need no reload.  The daemon follows the
+kernel's netlink notifications (`truenas_pydiscovery_utils.interface_monitor`)
+and, once they have been quiet for a second (at most five seconds after
+the first), reads the interfaces again.  If anything differs, each
+protocol updates the interfaces whose addresses changed: NetBIOS NS
+claims its names on new subnets and closes vanished ones, mDNS says
+goodbye for addresses it no longer publishes and probes and announces
+again, WS-Discovery serves the new addresses and sends Hello.  An
+interface configured before it exists, or before it has an address, is
+served once it has one.  See `truenas-discoveryd(8)`, INTERFACE
+CHANGES.
 
 ```bash
 truenas-discoveryd -c /etc/truenas-discovery/truenas-discoveryd.conf
@@ -106,6 +123,22 @@ system user (group `daemon`, created in `postinst`), with
 still bind 137/138/3702/5353/5357 and send raw frames. Also:
 `After=network-online.target`, `Restart=on-failure`,
 `ProtectSystem=strict`, `ProtectHome=true`, `NoNewPrivileges=true`.
+
+`Type=notify-reload`: the daemon sends `READY=1` as soon as its signal
+handlers are installed, before the protocols probe and register names,
+so systemd's start timeout does not cover that work; a stop request
+abandons whatever startup has left.  It brackets each SIGHUP reload
+with `RELOADING=1` / `READY=1`, so `systemctl reload` waits for the
+reload to finish.  A SIGHUP that arrives during startup or during
+another reload is held and served by one more reload once that
+finishes.  systemd applies the start timeout to reloads too, so the
+unit sets `TimeoutStartSec=300` to cover a reload that first waits for
+startup to finish.  Startup ends with one reload pass, which applies
+configuration written before `READY=1` (systemd does not signal a
+reload requested before then).  `RestartForceExitStatus=SIGHUP`
+restarts the unit if a SIGHUP ever arrives before the handlers are
+installed.  Requires systemd 253 or later; the package `Breaks:` older
+versions.
 
 ### Configuration
 
@@ -256,7 +289,43 @@ PYTHONPATH=src python3 -m pytest tests/ --cov=truenas_pymdns --cov=truenas_pynet
 # Lint and type check
 flake8 --max-line-length=110 src/
 mypy src/
+
+# Functional tests (see below)
+sudo TRUENAS_PYDISCOVERY_FUNCTIONAL=1 python3 -m pytest tests/functional -v
 ```
+
+### Functional tests
+
+`tests/functional/` exercises the installed daemon the way the network
+sees it.  Each test writes a configuration for the `truenas-discoveryd`
+unit, starts, reloads or stops it with `systemctl`, and queries it with
+the shipped client tools (`nbt-lookup`, `mdns-resolve`, `wsd-discover`)
+from network namespaces joined to the host by veth links.  They need
+root, systemd as init and the package installed, and run only when
+`TRUENAS_PYDISCOVERY_FUNCTIONAL=1` is set: they reconfigure the host's
+network and its `truenas-discoveryd` service, so use a disposable host.
+CI runs them in a Debian Trixie VM.
+
+## Continuous integration and releases
+
+`.github/workflows/build-test.yml` runs on pushes and pull requests to
+`master` and `stable/*`:
+
+- **build-test**: in a `debian:trixie` container, flake8, mypy, the
+  Debian package build, and the unit and integration tests against the
+  installed package.
+- **qemu-test**: boots a Debian Trixie cloud image under QEMU/KVM
+  (UEFI) on the runner, builds and installs the package in it, and
+  runs the whole suite as root, functional tests included.  The VM's
+  serial console and journal go into the job's `test-logs-debian-trixie`
+  artifact.
+- **publish**: on a push to a branch listed in `.github/trains.json`
+  (`master` as train `master`, `stable/27` as train `27`), once both
+  test jobs have passed, replaces the rolling `<train>-nightly` GitHub
+  prerelease with the package built by build-test, `SHA256SUMS`, and a
+  `manifest.json` naming the branch, commit, build, package version and
+  files.  Fetch `manifest.json` first and verify downloads against
+  `SHA256SUMS`; every publish replaces all assets.
 
 ## Contributing
 

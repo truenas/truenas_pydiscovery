@@ -99,6 +99,14 @@ def build_envelope(
         ).text = from_address
 
     if app_sequence is not None:
+        # SequenceId is a fresh URN on every message, as christgau/wsdd
+        # (``add_header_elements``) and wsdd-native
+        # (``WSDResponseBuilder::build``) emit it.  This departs from
+        # WS-Discovery 1.1 §7, where SequenceId is optional and "the
+        # ordering of messages with different value of SequenceId but
+        # the same value of InstanceId ... is undefined": a receiver
+        # cannot order our messages by MessageNumber.  The spec's own
+        # AppSequence examples omit the attribute.
         ET.SubElement(
             header, qname(Prefix.WSD, Element.APP_SEQUENCE),
             attrib={

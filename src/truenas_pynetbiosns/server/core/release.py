@@ -1,7 +1,10 @@
-"""NetBIOS name release on shutdown.
+"""NetBIOS name release for names given up while running.
 
-Sends release packets (TTL=0) for all registered names so other
-nodes know we are leaving the network.  Analogous to mDNS goodbye.
+Sends release packets (TTL=0) for the names a reload drops, as Samba
+nmbd releases a name it gives up while running
+(``unbecome_local_master_browser`` calling ``release_name``).  Nothing
+is released at shutdown: nmbd's ``terminate`` releases only names
+registered with a WINS server (``release_wins_names``).
 """
 from __future__ import annotations
 
@@ -21,29 +24,6 @@ SendFn = Callable[[NBNSMessage], None]
 NameRecord = tuple[str, NameType, bool]
 
 
-def release_all_names(
-    send_fn: SendFn,
-    name_table: NameTable,
-    ip: IPv4Address,
-) -> None:
-    """Send release packets for all registered names."""
-    entries = name_table.all_registered()
-    if not entries:
-        return
-
-    for entry in entries:
-        msg = NBNSMessage.build_release(
-            entry.name.name,
-            entry.name.name_type,
-            ip,
-            scope=entry.name.scope,
-            group=entry.is_group,
-        )
-        send_fn(msg)
-
-    logger.info("Released %d names", len(entries))
-
-
 def release_names(
     send_fn: SendFn,
     name_table: NameTable,
@@ -55,9 +35,8 @@ def release_names(
     *names* is a set of ``(name, name_type, is_group)`` tuples.  Each
     currently-registered entry in *name_table* whose identity matches
     a tuple in *names* is released (TTL=0 broadcast) and removed
-    from the table so the refresher stops refreshing it and the
-    responder stops answering for it.  Tuples not in the table are
-    silently skipped.
+    from the table so the responder stops answering for it.  Tuples
+    not in the table are silently skipped.
 
     Used by the SIGHUP live-update path to surrender only the names
     that actually went away (e.g. when the primary NetBIOS name

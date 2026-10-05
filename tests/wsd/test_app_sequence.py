@@ -2,7 +2,8 @@
 
 The AppSequence header carries three fields:
   * ``InstanceId`` — fixed per daemon lifetime
-  * ``SequenceId`` — per-group; each group gets a stable URN
+  * ``SequenceId`` — a fresh URN on every message, matching wsdd
+    (see ``build_envelope`` for the §7 divergence)
   * ``MessageNumber`` — monotonically increasing across messages
 
 This test exercises the invariants at the builder level so we don't

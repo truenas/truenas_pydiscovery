@@ -4,9 +4,10 @@ Wire protocol: parsing and building NetBIOS Name Service packets per RFC 1002.
 
 ## Modules
 
-- `constants.py` — ports (137/138), opcodes, name types (0x00 workstation, 0x03 messenger, 0x20 server), header flags, NB rdata flags, timing values, browse opcodes, server type flags
+- `constants.py` — ports (137/138), opcodes, name types (0x00 workstation, 0x03 messenger, 0x20 server), header flags, NB rdata flags, timing values, browse opcodes, server type flags, NetBIOS datagram types/flags and mailslot-write constants
 - `name.py` — `NetBIOSName` dataclass, first-level (half-ASCII) encoding/decoding. 15-char names are space-padded and uppercased, the 16th byte is the service type suffix, each byte becomes two wire bytes via nibble-split + 0x41. Optional scope encoded as DNS-style labels.
 - `message.py` — `NBNSMessage`, `NBQuestion`, `NBResourceRecord` with full packet serialization and convenience builders (`build_name_query`, `build_registration`, `build_release`, `build_refresh`, `build_positive_response`, `build_negative_response`, `build_node_status_query`, `build_node_status_response`)
+- `datagram.py` — port-138 framing for browser frames: `build_mailslot_write` (SMB_COM_TRANSACTION mailslot write, MS-MAIL §2.2.1) and `build_mailslot_datagram` (DIRECT_GROUP NetBIOS datagram, RFC 1002 §4.4.2), laid out as Samba nmbd's `send_mailslot` builds them apart from the source node type (B node; nmbd marks its datagrams M node)
 
 ## NetBIOS Name Wire Encoding
 
@@ -49,14 +50,15 @@ Daemon registers HOSTNAME<0x20> (file server) on startup:
 ```
   truenas                                     broadcast:137
        |                                           |
-       |  REGISTRATION (x3 at 250ms intervals)     |
+       |  REGISTRATION (x4, 1 s apart, as nmbd)    |
        |  Opcode: REGISTRATION (5)                 |
        |  QD: TRUENAS<20> NB?                      |
        |  AR: TRUENAS<20> NB 192.168.1.100         |
        |  Flags: RD, BROADCAST                     |
        |------------------------------------------>|
        |                                           |
-       |          (no negative response)           |
+       |    (no negative response 1 s after the    |
+       |     last request)                         |
        |                                           |
        | → name registered in local table          |
 ```
@@ -123,12 +125,15 @@ A Windows client resolves a NetBIOS name:
 
 ### Name Release (RFC 1002 s4.2.10)
 
-Daemon releases names on shutdown:
+The daemon releases a name it stops using while running (a reload that
+renames the host or drops an alias), as nmbd releases a name it gives
+up.  Like nmbd, it releases no name at shutdown or when it rebuilds a
+subnet:
 
 ```
   truenas                                     broadcast:137
        |                                           |
-       |  RELEASE (for each registered name)       |
+       |  RELEASE (for each name given up)         |
        |  Opcode: RELEASE (6)                      |
        |  QD: TRUENAS<20> NB?                      |
        |  AR: TRUENAS<20> NB TTL=0                 |
@@ -143,11 +148,15 @@ Periodic server announcement to browse list:
 ```
   truenas                                        broadcast:138
        |                                              |
-       |  DATAGRAM (mailslot \MAILSLOT\BROWSE)        |
+       |  DATAGRAM DIRECT_GROUP TRUENAS<00> →         |
+       |    WORKGROUP<1D>, mailslot \MAILSLOT\BROWSE  |
        |  Opcode: HOST_ANNOUNCEMENT (0x01)            |
        |  ServerName: TRUENAS                         |
        |  ServerType: WORKSTATION | SERVER            |
        |  Comment: "TrueNAS Server"                   |
-       |  (intervals: 1m, 2m, 4m... cap 12m)          |
+       |  (intervals: 1m, 2m, 3m... cap 12m, as nmbd)  |
        |--------------------------------------------->|
 ```
+
+At shutdown the daemon announces the server as removed, as nmbd does:
+the same HostAnnouncement with ServerType 0 and Periodicity 0.

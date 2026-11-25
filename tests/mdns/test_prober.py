@@ -1,8 +1,10 @@
 """Prober state machine for RFC 6762 s8 probing.
 
 Covers the probe sequence (3 probes at 250ms intervals), session
-aggregation of concurrent probes, conflict resolution via lexicographic
-compare, and the s8.1 conflict rate-limit backoff.
+aggregation of concurrent probes, what counts as a conflict -- a
+response naming a probed name (s8.1), a simultaneous probe that wins
+the lexicographic tiebreak (s8.2), never the host's own records
+(s9, s14) -- and the s8.1 conflict rate-limit backoff.
 """
 from __future__ import annotations
 
@@ -11,30 +13,62 @@ import collections
 import gc
 import time
 import warnings
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, IPv6Address
 
 from truenas_pymdns.protocol.constants import (
     CONFLICT_RATE_MAX,
     PROBE_COUNT,
     QType,
 )
-from truenas_pymdns.protocol.message import MDNSMessage
+from truenas_pymdns.protocol.message import MDNSMessage, MDNSQuestion
 from truenas_pymdns.protocol.records import (
+    AAAARecordData,
     ARecordData,
     MDNSRecord,
     MDNSRecordKey,
     PTRRecordData,
 )
+from truenas_pymdns.server.core.entry_group import EntryGroup
 from truenas_pymdns.server.core.prober import Prober
 
+PEER = ("10.0.0.99", 5353)
 
-def _a(name: str, addr: str) -> MDNSRecord:
+
+def _a(name: str, addr: str, ttl: int = 120) -> MDNSRecord:
     return MDNSRecord(
         key=MDNSRecordKey(name, QType.A),
-        ttl=120,
+        ttl=ttl,
         data=ARecordData(IPv4Address(addr)),
         cache_flush=True,
     )
+
+
+def _aaaa(name: str, addr: str) -> MDNSRecord:
+    return MDNSRecord(
+        key=MDNSRecordKey(name, QType.AAAA),
+        ttl=120,
+        data=AAAARecordData(IPv6Address(addr)),
+        cache_flush=True,
+    )
+
+
+def _answer(*records: MDNSRecord) -> MDNSMessage:
+    """A response asserting *records*, as a host that owns them sends."""
+    return MDNSMessage.build_response(list(records))
+
+
+def _peer_probe(name: str, *records: MDNSRecord) -> MDNSMessage:
+    """Another host's probe for *name*, proposing *records*."""
+    return MDNSMessage.build_probe(
+        [MDNSQuestion(name, QType.ANY, unicast_response=True)],
+        list(records),
+    )
+
+
+async def _probes_sent(sent: list[MDNSMessage], count: int) -> None:
+    """Wait until *count* probes in all have gone through ``send_fn``."""
+    while len(sent) < count:
+        await asyncio.sleep(0.005)
 
 
 def _prober(
@@ -145,50 +179,42 @@ class TestProbeAggregation:
 
 class TestConflictResolution:
     def test_two_conflicts_trigger_rename(self):
-        """RFC 6762 §8.2: the first conflict starts a 1s defer +
-        same-name retry (stale-packet tolerance).  Only the second
-        conflict declares a real peer and triggers rename via the
-        ``on_conflict`` callback."""
+        """RFC 6762 §8.1: a probing host MUST defer to a host that
+        answers for the name.  The first answer starts a 1s defer and a
+        same-name re-probe (stale-packet tolerance); an answer to the
+        re-probe declares a real peer and fires ``on_conflict``."""
+        sent: list[MDNSMessage] = []
         conflicts: list[list[MDNSRecord]] = []
-        p = _prober(conflicts=conflicts)
-        # RFC 6762 §8.2: the GREATER rdata wins the tiebreak.  For
-        # our prober to rename itself, our rdata must be LESS than
-        # the peer's — i.e. our A record has the lower address.
+        p = _prober(sent, conflicts)
         our = _a("claim.local", "10.0.0.1")
-        peer = _a("claim.local", "10.0.0.99")
+        answer = _answer(_a("claim.local", "10.0.0.99"))
 
         async def run() -> bool:
             task = asyncio.create_task(p.probe([our]))
-            # Let the aggregation jitter kick off the cycle so
-            # _sessions is populated before we feed the conflict.
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400  # QR | AA
-            peer_msg.answers = [peer]
-            # 1st conflict: triggers defer + same-name retry; future
-            # stays pending.
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            # 2nd conflict: exceeds MAX_PROBING_CONFLICT_RETRIES,
-            # resolves future to False and fires on_conflict.
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            result = await task
-            p.cancel_all()
-            return result
+            await _probes_sent(sent, 1)
+            p.handle_incoming(answer, PEER)
+            assert not task.done()
+            # The peer answers the re-probe that follows the defer too.
+            await _probes_sent(sent, len(sent) + 1)
+            p.handle_incoming(answer, PEER)
+            return await task
 
-        assert _run(run()) is False
+        assert _run(run(), timeout=5.0) is False
         assert conflicts == [[our]]
 
-    def test_case_flipped_peer_rdata_ties_not_conflicts(self):
+    def test_case_flipped_peer_rdata_is_not_a_conflict(self):
         """BCT Phase II (guideline line 820) actively mutates
         case on tiebreaking replies — "the device must match
         mDNS names case-insensitively."  A peer asserting an
-        uppercase version of our lowercase PTR target must
-        tiebreak as equal (cmp == 0), NOT trigger a rename.
+        uppercase version of our lowercase PTR target asserts
+        a record identical to ours (RFC 6762 §16), which RFC 6762
+        §9 never counts as inconsistent: probing must succeed.
 
-        Regression guard for the identity-based lex compare
+        Regression guard for the identity-based record compare
         introduced alongside ``_identity``."""
+        sent: list[MDNSMessage] = []
         conflicts: list[list[MDNSRecord]] = []
-        p = _prober(conflicts=conflicts)
+        p = _prober(sent, conflicts)
         our = MDNSRecord(
             key=MDNSRecordKey("36.161.123.10.in-addr.arpa", QType.PTR),
             ttl=120,
@@ -205,42 +231,30 @@ class TestConflictResolution:
 
         async def run() -> bool:
             task = asyncio.create_task(p.probe([our]))
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400
-            peer_msg.answers = [peer]
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            # Cancel explicitly — if the fix is correct, no
-            # conflict was registered and the probe is still
-            # cycling; we don't need to wait for it.
-            p.cancel_all()
-            try:
-                return await task
-            except asyncio.CancelledError:
-                return False
+            await _probes_sent(sent, 1)
+            p.handle_incoming(_answer(peer), PEER)
+            return await task
 
-        _run(run(), timeout=2.0)
+        assert _run(run()) is True
         assert conflicts == [], (
             "case-flipped peer rdata must not fire the conflict "
-            "callback; tiebreak should score as equal"
+            "callback; the records are identical"
         )
 
     def test_single_conflict_triggers_defer_without_rename(self):
         """RFC 6762 §8.2: first conflict sets a 1s suppression window
         and keeps the same name — does NOT invoke ``on_conflict``."""
+        sent: list[MDNSMessage] = []
         conflicts: list[list[MDNSRecord]] = []
-        p = _prober(conflicts=conflicts)
+        p = _prober(sent, conflicts)
         our = _a("claim.local", "10.0.0.1")
         peer = _a("claim.local", "10.0.0.99")
 
         async def run() -> None:
             task = asyncio.create_task(p.probe([our]))
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400
-            peer_msg.answers = [peer]
+            await _probes_sent(sent, 1)
             before = time.monotonic()
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
+            p.handle_incoming(_answer(peer), PEER)
 
             # Suppression window bumped out ~1s; on_conflict NOT called
             # (rename deferred).  Session still alive, future pending.
@@ -263,12 +277,148 @@ class TestConflictResolution:
         _run(run(), timeout=2.0)
 
 
+class TestResponseWhileProbing:
+    """RFC 6762 §8.1: "During probing, from the time the first probe
+    packet is sent until 250 ms after the third probe, if any
+    conflicting Multicast DNS response is received, then the probing
+    host MUST defer to the existing host".
+
+    A host that answers already owns the name: unlike a simultaneous
+    probe (§8.2), an answer is not settled by comparing rdata.
+    """
+
+    def _conflicts_after(
+        self, our: list[MDNSRecord], *messages: MDNSMessage,
+        prober: Prober | None = None,
+        sent: list[MDNSMessage] | None = None,
+    ) -> int:
+        """Feed *messages* once the first probe for *our* is out;
+        return how many conflicts the session counted."""
+        if prober is None:
+            sent = []
+            prober = _prober(sent)
+        assert sent is not None
+        p = prober
+
+        async def run() -> int:
+            task = asyncio.create_task(p.probe(our))
+            await _probes_sent(sent, 1)
+            for message in messages:
+                p.handle_incoming(message, PEER)
+            counted = p._sessions[our[0].key.name].conflicts_seen
+            p.cancel_all()
+            await task
+            return counted
+
+        return _run(run())
+
+    def test_answer_with_earlier_rdata_still_conflicts(self):
+        """The peer's address sorts BEFORE ours.  A §8.2 tiebreak would
+        let us win and take a name another host is using."""
+        our = [_a("claim.local", "10.0.0.99")]
+        assert self._conflicts_after(
+            our, _answer(_a("claim.local", "10.0.0.1")),
+        ) == 1
+
+    def test_answer_of_another_type_conflicts(self):
+        """We probe with type ANY, so "any answer containing a record
+        with that name, of any type, MUST be considered a conflicting
+        response"."""
+        our = [_a("claim.local", "10.0.0.1")]
+        assert self._conflicts_after(
+            our, _answer(_aaaa("claim.local", "2001:db8::99")),
+        ) == 1
+
+    def test_answer_before_the_first_probe_is_ignored(self):
+        """Responses "received *before* the first probe packet is sent
+        MUST be silently ignored"."""
+        sent: list[MDNSMessage] = []
+        p = _prober(sent)
+        our = _a("claim.local", "10.0.0.1")
+
+        async def run() -> int:
+            task = asyncio.create_task(p.probe([our]))
+            # The session exists; the cycle is in its initial jitter.
+            await asyncio.sleep(0)
+            assert sent == []
+            p.handle_incoming(_answer(_a("claim.local", "10.0.0.99")), PEER)
+            counted = p._sessions["claim.local"].conflicts_seen
+            p.cancel_all()
+            await task
+            return counted
+
+        assert _run(run()) == 0
+
+    def test_second_copy_of_an_answer_counts_once(self):
+        """A conflict starts the probe sequence over, so the same answer
+        arriving again before the re-probe -- its copy over the other
+        address family, say -- cannot count a second time and skip the
+        stale-packet retry."""
+        conflicts: list[list[MDNSRecord]] = []
+        sent: list[MDNSMessage] = []
+        p = _prober(sent, conflicts)
+        answer = _answer(_a("claim.local", "10.0.0.99"))
+        assert self._conflicts_after(
+            [_a("claim.local", "10.0.0.1")], answer, answer,
+            prober=p, sent=sent,
+        ) == 1
+        assert conflicts == []
+
+    def test_goodbye_is_not_a_conflict(self):
+        """A TTL=0 record withdraws, it does not assert (§10.1)."""
+        our = [_a("claim.local", "10.0.0.1")]
+        assert self._conflicts_after(
+            our, _answer(_a("claim.local", "10.0.0.99", ttl=0)),
+        ) == 0
+
+    def test_own_record_from_another_interface_is_not_a_conflict(self):
+        """RFC 6762 §14: with two interfaces on one link, "packets the
+        host sends on one interface will arrive on the other interface
+        a few milliseconds later".  The interface that probed first
+        answers the other's probe with its own addresses; ``owns``
+        vouches for them, so the second interface keeps the name.
+
+        This is the multihomed rename loop: the AAAA-only answer sorts
+        after our A record and used to win the §8.2 tiebreak."""
+        sibling = EntryGroup()
+        sibling.add_address("nas.local", "192.0.2.3")
+        sibling.add_address("nas.local", "2001:db8::3")
+        ours = EntryGroup()
+        ours.add_address("nas.local", "192.0.2.4")
+        ours.add_address("nas.local", "2001:db8::4")
+        sibling_a = [r for r in sibling.records if r.key.rtype == QType.A]
+        sibling_aaaa = [
+            r for r in sibling.records if r.key.rtype == QType.AAAA
+        ]
+        sent: list[MDNSMessage] = []
+        conflicts: list[list[MDNSRecord]] = []
+        p = Prober(
+            sent.append, conflicts.append,
+            owns=set(sibling.records).__contains__,
+        )
+
+        async def run() -> bool:
+            task = asyncio.create_task(p.probe(ours.get_unique_records()))
+            await _probes_sent(sent, 1)
+            p.handle_incoming(_answer(*sibling_a), PEER)
+            p.handle_incoming(_answer(*sibling_aaaa), PEER)
+            return await task
+
+        assert _run(run()) is True
+        assert conflicts == []
+
+        # Without ``owns`` the same answer is a peer's: the control.
+        assert self._conflicts_after(
+            ours.get_unique_records(), _answer(*sibling_aaaa),
+        ) == 1
+
+
 class TestLexicographicMultiRecordTiebreak:
-    """RFC 6762 §8.2: when two probers propose the SAME primary name
-    but differ in the set of records attached to it, compare the
-    sorted sets element by element, falling through to a length
-    comparison.  The GREATER set wins the tiebreak; the LESSER set
-    must rename.
+    """RFC 6762 §8.2: when another host probes for the same name at
+    the same time, compare the sorted record sets proposed in the two
+    Authority Sections element by element, falling through to a
+    length comparison.  The GREATER set wins the tiebreak; the LESSER
+    set must defer (and, losing again, rename).
     """
 
     def _run_probe_with_peer(
@@ -277,20 +427,16 @@ class TestLexicographicMultiRecordTiebreak:
     ) -> tuple[bool, list[list[MDNSRecord]]]:
         conflicts: list[list[MDNSRecord]] = []
         p = _prober(conflicts=conflicts)
+        probe = _peer_probe(our_records[0].key.name, *peer_records)
 
         async def run() -> bool:
             task = asyncio.create_task(p.probe(our_records))
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400
-            peer_msg.answers = peer_records
-            # RFC 6762 §8.2: two conflicts required to trigger rename
-            # (first is absorbed by stale-packet tolerance).
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            result = await task
-            p.cancel_all()
-            return result
+            await asyncio.sleep(0)
+            # Two lost tiebreaks: the first defers (stale-packet
+            # tolerance), the second renames.
+            p.handle_incoming(probe, PEER)
+            p.handle_incoming(probe, PEER)
+            return await task
 
         return _run(run()), conflicts
 
@@ -329,52 +475,46 @@ class TestLexicographicMultiRecordTiebreak:
             _a("multi.local", "10.0.0.1"),
             _a("multi.local", "10.0.0.2"),
         ]
-        peer = [_a("multi.local", "10.0.0.1")]
+        result, conflicts = self._run_probe_with_peer(
+            ours, [_a("multi.local", "10.0.0.1")],
+        )
+        assert result is True
+        assert conflicts == [], "longer set must not trigger a conflict"
 
-        p = _prober()
+    def test_earlier_peer_probe_loses_to_us(self):
+        """The tiebreak still decides between two probes: the peer's
+        address sorts before ours, so ours wins and probing goes on.
+        Compare ``test_answer_with_earlier_rdata_still_conflicts``."""
+        result, conflicts = self._run_probe_with_peer(
+            [_a("claim.local", "10.0.0.99")],
+            [_a("claim.local", "10.0.0.1")],
+        )
+        assert result is True
+        assert conflicts == []
+
+    def test_own_probe_from_another_interface_is_not_a_competitor(self):
+        """Our own probe, sent on another interface on the same link
+        (RFC 6762 §14), proposes records ``owns`` vouches for.  It would
+        win the tiebreak -- 192.0.2.4 sorts after 192.0.2.3 -- but is
+        no other host's claim."""
+        ours = [_a("nas.local", "192.0.2.3")]
+        sibling = [_a("nas.local", "192.0.2.4")]
+        conflicts: list[list[MDNSRecord]] = []
+        p = Prober(
+            lambda m: None, conflicts.append,
+            owns=set(sibling).__contains__,
+        )
+        probe = _peer_probe("nas.local", *sibling)
 
         async def run() -> bool:
             task = asyncio.create_task(p.probe(ours))
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400
-            peer_msg.answers = peer
-            p.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            # Don't wait for the full probe cycle — just confirm no
-            # conflict was scheduled within the aggregation window.
-            await asyncio.sleep(0.040)
-            p.cancel_all()
-            try:
-                return await task
-            except asyncio.CancelledError:
-                return False
+            await asyncio.sleep(0)
+            p.handle_incoming(probe, PEER)
+            p.handle_incoming(probe, PEER)
+            return await task
 
-        # Run the coroutine; whether it returns True or raises is
-        # less interesting than whether the conflict future was
-        # resolved to False.  What matters is ``_on_conflict`` was
-        # NOT invoked.  Use the conflict-capture form.
-        conflicts: list[list[MDNSRecord]] = []
-        p2 = Prober(
-            send_fn=lambda m: None,
-            on_conflict=conflicts.append,
-        )
-
-        async def run2() -> None:
-            task = asyncio.create_task(p2.probe(ours))
-            await asyncio.sleep(0.020)
-            peer_msg = MDNSMessage()
-            peer_msg.flags = 0x8400
-            peer_msg.answers = peer
-            p2.handle_incoming(peer_msg, ("10.0.0.99", 5353))
-            await asyncio.sleep(0.040)
-            p2.cancel_all()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        _run(run2(), timeout=2.0)
-        assert conflicts == [], "longer set must not trigger a conflict"
+        assert _run(run()) is True
+        assert conflicts == []
 
 
 class TestSimultaneousProbeDefer:

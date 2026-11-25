@@ -353,10 +353,10 @@ class TestRenameConvergence:
 
                 # The LAN peer owns "nas-2.local" and defends it: any
                 # probe naming it is answered straight back into the
-                # prober, the way a zero-latency network would.  Its A
-                # rdata (203.0.113.200) is lexicographically greater
-                # than ours (192.0.2.10), so we lose every §8.2
-                # tiebreak.  "nas-3.local" is undefended.
+                # prober, the way a zero-latency network would.  An
+                # answer from the name's owner is a conflict whatever
+                # its rdata (RFC 6762 §8.1), so every probe of it
+                # fails.  "nas-3.local" is undefended.
                 contested = "nas-2.local"
                 peer = MDNSRecord(
                     key=MDNSRecordKey(contested, QType.A),
@@ -513,9 +513,8 @@ class TestRenameRestartCap:
 
             # A zero-latency peer that owns *every* name we might
             # try: each probe question is answered straight back
-            # into the prober with greater rdata (203.0.113.200 >
-            # 192.0.2.10), so every §8.2 tiebreak is lost and no
-            # rename can converge.
+            # into the prober, a conflict per RFC 6762 §8.1, so
+            # every probe fails and no rename can converge.
             def defend_everything(msg: MDNSMessage) -> None:
                 answers = [
                     MDNSRecord(

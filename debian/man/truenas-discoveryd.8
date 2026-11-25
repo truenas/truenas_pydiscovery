@@ -100,7 +100,9 @@ The mDNS host name is an exception: it is established by probing at
 startup and is not re\-read on reload.  Once running, it changes only
 through RFC 6762 conflict resolution, when another host on the link
 claims the same name and this one renames itself (for example
-\fBnas.local\fP to \fBnas\-2.local\fP).  Re\-deriving the name from
+\fBnas.local\fP to \fBnas\-2.local\fP).  Several of the daemon's own
+interfaces on one link are not another host: each answers for the
+name with its own addresses, and the name is kept.  Re\-deriving the name from
 the configuration file on every reload would silently undo that and
 put the daemon back onto the contested name.  To change the
 advertised host name, restart the service rather than reloading it;

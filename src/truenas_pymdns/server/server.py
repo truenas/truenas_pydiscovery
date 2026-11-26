@@ -229,6 +229,20 @@ class MDNSServer(ConfigDaemon):
         if not ifstate.transport.is_active:
             return
 
+        self._attach_handlers(ifstate, loop)
+        self._interfaces[iface.index] = ifstate
+        logger.info(
+            "Interface %s (index %d, v4=%s, v6=%d addrs) ready",
+            iface.name, iface.index,
+            iface.addrs_v4[0] if iface.addrs_v4 else "none",
+            len(iface.addrs_v6),
+        )
+
+    def _attach_handlers(
+        self, ifstate: PerInterfaceState, loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Give *ifstate* the responder, prober and announcer that send
+        through its transport."""
         transport = ifstate.transport
 
         # ``MDNSTransport.send_message`` fills both Responder roles:
@@ -241,21 +255,53 @@ class MDNSServer(ConfigDaemon):
         ifstate.responder.start(loop)
 
         ifstate.prober = Prober(
-            ifstate.transport.send_message,
+            transport.send_message,
             self._on_conflict,
+            owns=self._owns_record,
         )
 
-        ifstate.announcer = Announcer(ifstate.transport.send_message)
-
-        self._interfaces[iface.index] = ifstate
-        logger.info(
-            "Interface %s (index %d, v4=%s, v6=%d addrs) ready",
-            iface.name, iface.index,
-            iface.addrs_v4[0] if iface.addrs_v4 else "none",
-            len(iface.addrs_v6),
-        )
+        ifstate.announcer = Announcer(transport.send_message)
 
     # -- Message handling -----------------------------------------------------
+
+    def _owns_record(self, record: MDNSRecord) -> bool:
+        """True if *record* is identical to one we publish, on any
+        interface.
+
+        The conflict checks ask this before they treat a record as a
+        peer's (``Prober``, ``_check_established_conflicts``), because
+        two of our interfaces on one link hear each other.  RFC 6762
+        §14: "If the two networks are bridged together, then packets
+        the host sends on one interface will arrive on the other
+        interface a few milliseconds later, and care must be taken to
+        ensure that this bridging does not cause problems".  What
+        arrives carries the other interface's addresses, which §6.2
+        keeps out of this one's host group, so a check against this
+        interface's records alone takes them for a peer's: the
+        interface probing second loses its own host name to the
+        interface that probed first, and every rename after that loses
+        the same way.  (Linux drops the IPv4 copies on arrival, their
+        source being one of the host's own addresses, but delivers the
+        IPv6 ones.)
+
+        RFC 6762 §9: "resource records with identical rdata are never
+        considered inconsistent, even if they originate from different
+        hosts".  Both references apply that across interfaces: avahi's
+        ``handle_conflict`` (``server.c:241``) and ``incoming_probe``
+        (``server.c:196``) look the key up among the entries of every
+        interface and call an identical one ours, and mDNSResponder's
+        ``AdvertiseInterface`` puts every interface's address record in
+        one RRSet (``mDNS.c:13926``), whose members ``PacketRRConflict``
+        never counts against each other (``mDNS.c:7980``).
+
+        A group in COLLISION does not count: its names were conceded
+        (§9).
+        """
+        return any(
+            group.state != EntryGroupState.COLLISION
+            and record in group.records
+            for group in self._entry_groups
+        )
 
     def _handle_message(
         self, message: MDNSMessage, source: tuple, ifindex: int,
@@ -777,6 +823,10 @@ class MDNSServer(ConfigDaemon):
             if not unique_owned:
                 continue
             if any(ow.record.data == rr.data for ow in unique_owned):
+                continue
+            if self._owns_record(rr):
+                # Ours from another interface on this link (RFC 6762
+                # §14), not a peer's: see ``_owns_record``.
                 continue
             if any(ow.should_probe for ow in unique_owned):
                 conflicts.add((rr.key.name.lower(), rr.key.rtype))

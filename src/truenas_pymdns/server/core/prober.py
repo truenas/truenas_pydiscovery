@@ -7,6 +7,15 @@ Probing sequence (RFC 6762 s8.1):
   4. If no conflict by 250ms after third probe, probing succeeds
   5. If conflict detected, defer and choose new name
 
+What counts as a conflict:
+  - A response naming a probed name, once the first probe is out
+    (s8.1): the responder already holds the name, and we defer to it
+    whatever its rdata.
+  - A simultaneous probe for the name whose proposed records are
+    lexicographically later than ours (s8.2 tiebreak).
+  - Never a record this host itself publishes, on this or any other
+    interface (s9, s14) -- see ``Prober._is_ours``.
+
 Probe aggregation (like avahi-core/probe-sched.c):
   Multiple concurrent probe() calls are batched into single
   probe messages to reduce wire traffic at startup when
@@ -44,12 +53,20 @@ from .conflict import lexicographic_compare
 logger = logging.getLogger(__name__)
 
 
+def _owns_nothing(record: MDNSRecord) -> bool:
+    """Ownership check for a prober with no registry behind it."""
+    return False
+
+
 @dataclass
 class ProbingSession:
     """Tracks state for one in-flight probing attempt."""
     records: list[MDNSRecord]
     names: set[str]
     future: asyncio.Future
+    # Probes sent since the sequence last (re)started.  Zero means no
+    # probe of this sequence is out yet, and RFC 6762 §8.1 ignores the
+    # responses that arrive then (``_response_conflicts``).
     probes_sent: int = 0
     # RFC 6762 s8.2 stale-packet tolerance: conflicts observed so far
     # for this session.  <= MAX_PROBING_CONFLICT_RETRIES triggers a
@@ -71,9 +88,13 @@ class Prober:
         self,
         send_fn: Callable[[MDNSMessage], None],
         on_conflict: Callable[[list[MDNSRecord]], None],
+        owns: Callable[[MDNSRecord], bool] = _owns_nothing,
     ) -> None:
         self._send = send_fn
         self._on_conflict = on_conflict
+        # True for a record this host publishes anywhere, on any
+        # interface; the server passes ``MDNSServer._owns_record``.
+        self._owns = owns
         self._sessions: dict[str, ProbingSession] = {}
         # RFC 6762 s8.1: conflict rate limiting
         self._conflict_times: collections.deque[float] = collections.deque()
@@ -143,94 +164,157 @@ class Prober:
             self._sessions.pop(session_key, None)
 
     def handle_incoming(self, message: MDNSMessage, source: tuple) -> None:
-        """Check incoming messages for conflicts with active probes.
+        """Check *message* against every probe in flight.
 
-        RFC 6762 s8.2: compare authority records lexicographically.
+        A response is a conflict on the terms of RFC 6762 §8.1
+        (``_response_conflicts``); a probe -- a query proposing records
+        in its Authority Section -- is settled by the §8.2 tiebreak
+        (``_loses_tiebreak``).  Neither counts a record this host
+        publishes itself (``_is_ours``).
         """
         if not self._sessions:
             return
 
-        conflict_records = (
-            message.answers if message.is_response
-            else message.authorities
-        )
-
-        for session_key, session in list(self._sessions.items()):
+        for session in list(self._sessions.values()):
             if session.future.done():
                 continue
+            if message.is_response:
+                lost = self._response_conflicts(session, message)
+            else:
+                lost = self._loses_tiebreak(session, message)
+            if lost:
+                self._lose(session, source)
 
-            their_records: list[MDNSRecord] = []
-            our_names = {n.lower() for n in session.names}
-            for rr in conflict_records:
-                if rr.key.name.lower() in our_names:
-                    their_records.append(rr)
+    def _is_ours(self, session: ProbingSession, record: MDNSRecord) -> bool:
+        """True if *record* is identical to one this host publishes.
 
-            if not their_records:
-                continue
+        RFC 6762 §9: "resource records with identical rdata are never
+        considered inconsistent, even if they originate from different
+        hosts" -- so neither a record we are probing for, nor one we
+        publish on another interface, is a conflict.  The second kind
+        is what a host hears when two of its interfaces share a link:
+        "packets the host sends on one interface will arrive on the
+        other interface a few milliseconds later" (§14), carrying the
+        other interface's addresses (see ``MDNSServer._owns_record``).
+        """
+        return record in session.records or self._owns(record)
 
-            our_unique = [r for r in session.records if r.cache_flush]
-            cmp = lexicographic_compare(our_unique, their_records)
+    def _response_conflicts(
+        self, session: ProbingSession, message: MDNSMessage,
+    ) -> bool:
+        """RFC 6762 §8.1: a response heard while probing.
 
-            # RFC 6762 §8.2: the record with lexicographically GREATER
-            # rdata wins.  ``lexicographic_compare`` returns the sign
-            # of ``ours - theirs``, so ``cmp < 0`` means ours is
-            # smaller — we lose the tiebreak.
-            if cmp < 0:
-                self._record_conflict()
-                session.conflicts_seen += 1
+        "During probing, from the time the first probe packet is sent
+        until 250 ms after the third probe, if any conflicting
+        Multicast DNS response is received, then the probing host MUST
+        defer to the existing host" -- a host that answers already owns
+        the name, so there is no tiebreak, and the order of the two
+        rdata does not matter.  Our probes ask for type ANY, so "any
+        answer containing a record with that name, of any type, MUST be
+        considered a conflicting response".  Not counted:
 
-                if session.conflicts_seen <= MAX_PROBING_CONFLICT_RETRIES:
-                    # RFC 6762 §8.2: "The logic for waiting one second
-                    # and then trying again is to guard against stale
-                    # probe packets on the network (possibly even stale
-                    # probe packets sent moments ago by this host
-                    # itself, before some configuration change, which
-                    # may be echoed back after a short delay by some
-                    # Ethernet switches and some 802.11 base stations)."
-                    # Pause all probes for 1s, then re-probe the SAME
-                    # name.  A real peer will answer our re-probe and
-                    # we'll rename on the next conflict; a stale echo
-                    # will go unanswered and the re-probe will succeed.
-                    #
-                    # Mirrors Apple mDNSResponder's
-                    # ``ResolveSimultaneousProbe`` (mDNSCore/mDNS.c),
-                    # which sets ``m->SuppressProbes = timenow +
-                    # mDNSPlatformOneSecond`` and resets ``ProbeCount``.
-                    logger.info(
-                        "Probe conflict for %s from %s "
-                        "(retry %d/%d after %.1fs per RFC 6762 s8.2)",
-                        session.names, source,
-                        session.conflicts_seen,
-                        MAX_PROBING_CONFLICT_RETRIES + 1,
-                        SIMULTANEOUS_PROBE_DEFER,
-                    )
-                    self._suppress_probes_until = (
-                        time.monotonic() + SIMULTANEOUS_PROBE_DEFER
-                    )
-                    session.probes_sent = 0
-                    if session not in self._pending_sessions:
-                        self._pending_sessions.append(session)
-                    # Cancel the in-flight cycle so no more probes go
-                    # on the wire during the defer window; the cycle's
-                    # except/finally re-queues any other active
-                    # sessions and chains a new cycle that honors
-                    # _suppress_probes_until.
-                    if self._probe_task and not self._probe_task.done():
-                        self._probe_task.cancel()
-                else:
-                    # Exceeded the retry allowance — a real peer owns
-                    # this name.  Rename per RFC 6762 s9.  Matches
-                    # mDNSResponder's `else` branch that calls
-                    # ``mDNS_Deregister_internal(..., mDNS_Dereg_conflict)``.
-                    logger.info(
-                        "Probe conflict for %s from %s "
-                        "(exceeded %d retries — renaming per RFC 6762 s9)",
-                        session.names, source,
-                        MAX_PROBING_CONFLICT_RETRIES,
-                    )
-                    if not session.future.done():
-                        session.future.set_result(False)
-                    self._on_conflict(session.records)
+        * responses before the first probe: they "MUST be silently
+          ignored".  A conflict starts the sequence over
+          (``probes_sent`` back to 0, ``_lose``), so a second copy of
+          the same answer -- over the other address family, say --
+          cannot count again before the re-probe.  mDNSResponder's
+          ``mDNSCoreReceiveResponse`` skips a response "received
+          before we even began probing" in the same way
+          (``mDNS.c:10306``);
+        * a goodbye (TTL 0, §10.1), which withdraws a record rather
+          than asserting it -- mDNSResponder tests ``rroriginalttl >
+          0`` before ``PacketRRConflict`` (``mDNS.c:10274``);
+        * a record this host publishes (``_is_ours``).
+        """
+        if session.probes_sent == 0:
+            return False
+        names = {n.lower() for n in session.names}
+        return any(
+            rr.key.name in names
+            and rr.ttl > 0
+            and not self._is_ours(session, rr)
+            for rr in message.answers
+        )
+
+    def _loses_tiebreak(
+        self, session: ProbingSession, message: MDNSMessage,
+    ) -> bool:
+        """RFC 6762 §8.2: another host probing for one of our names.
+
+        The records proposed in its Authority Section are compared
+        with ours, and "the lexicographically later data wins".  A
+        probe whose records are all this host's own is its own probe,
+        looped back or arriving from another of its interfaces on the
+        same link, and is not a competitor -- avahi's
+        ``incoming_probe`` (``server.c:196``) treats a probe matching
+        one of its entries on any interface the same way.
+        """
+        names = {n.lower() for n in session.names}
+        theirs = [rr for rr in message.authorities if rr.key.name in names]
+        if not theirs or all(self._is_ours(session, rr) for rr in theirs):
+            return False
+        our_unique = [r for r in session.records if r.cache_flush]
+        # ``lexicographic_compare`` returns the sign of ``ours -
+        # theirs``: below zero our data is the earlier one, and loses.
+        return lexicographic_compare(our_unique, theirs) < 0
+
+    def _lose(self, session: ProbingSession, source: tuple) -> None:
+        """*session* met a conflict: defer and probe again, or rename."""
+        self._record_conflict()
+        session.conflicts_seen += 1
+
+        if session.conflicts_seen <= MAX_PROBING_CONFLICT_RETRIES:
+            # RFC 6762 §8.2: "The logic for waiting one second and
+            # then trying again is to guard against stale probe
+            # packets on the network (possibly even stale probe
+            # packets sent moments ago by this host itself, before
+            # some configuration change, which may be echoed back
+            # after a short delay by some Ethernet switches and some
+            # 802.11 base stations)."  Pause all probes for 1s, then
+            # re-probe the SAME name.  A real peer will answer our
+            # re-probe and we'll rename on the next conflict; a stale
+            # echo will go unanswered and the re-probe will succeed.
+            #
+            # Mirrors Apple mDNSResponder, which pauses for one second
+            # after a lost tiebreak (``ResolveSimultaneousProbe`` at
+            # ``mDNS.c:8056``) and after a "possibly spurious multicast
+            # conflict" in a response (``mDNSCoreReceiveResponse`` at
+            # ``mDNS.c:10343``, up to ``kMaxAllowedMCastProbingConflicts``),
+            # resetting ``ProbeCount`` either way.
+            logger.info(
+                "Probe conflict for %s from %s "
+                "(retry %d/%d after %.1fs)",
+                session.names, source,
+                session.conflicts_seen,
+                MAX_PROBING_CONFLICT_RETRIES + 1,
+                SIMULTANEOUS_PROBE_DEFER,
+            )
+            self._suppress_probes_until = (
+                time.monotonic() + SIMULTANEOUS_PROBE_DEFER
+            )
+            session.probes_sent = 0
+            if session not in self._pending_sessions:
+                self._pending_sessions.append(session)
+            # Cancel the in-flight cycle so no more probes go on the
+            # wire during the defer window; the cycle's except/finally
+            # re-queues any other active sessions and chains a new
+            # cycle that honors _suppress_probes_until.
+            if self._probe_task and not self._probe_task.done():
+                self._probe_task.cancel()
+        else:
+            # Exceeded the retry allowance — a real peer owns this
+            # name.  Rename per RFC 6762 s9.  Matches mDNSResponder's
+            # `else` branch that calls
+            # ``mDNS_Deregister_internal(..., mDNS_Dereg_conflict)``.
+            logger.info(
+                "Probe conflict for %s from %s "
+                "(exceeded %d retries — renaming per RFC 6762 s9)",
+                session.names, source,
+                MAX_PROBING_CONFLICT_RETRIES,
+            )
+            if not session.future.done():
+                session.future.set_result(False)
+            self._on_conflict(session.records)
 
     def cancel_all(self) -> None:
         """Cancel all active probing sessions."""
@@ -298,9 +382,14 @@ class Prober:
                 if not active:
                     return
 
-                self._send_aggregated_probe(active)
+                # Counted before the send: a reply can be handled before
+                # the send returns, and RFC 6762 §8.1 counts responses
+                # "from the time the first probe packet is sent".  A
+                # conflict it raises resets the count (``_lose``),
+                # which an increment after the send would undo.
                 for s in active:
                     s.probes_sent += 1
+                self._send_aggregated_probe(active)
 
                 if i < PROBE_COUNT - 1:
                     await asyncio.sleep(PROBE_INTERVAL)
